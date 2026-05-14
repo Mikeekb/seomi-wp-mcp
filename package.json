@@ -1,6 +1,6 @@
 {
   "name": "@seomi/wp-mcp",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Universal installer for SEOMI MCP Abilities — wires WordPress projects to AI agents in one command (mu-plugin, MCP servers, Abilities API, MCP Adapter, ai-factory skill).",
   "type": "module",
   "bin": {
