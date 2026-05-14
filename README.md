@@ -150,3 +150,7 @@ Proprietary — © SEOMI. See `LICENSE`.
 - [WordPress/abilities-api](https://github.com/WordPress/abilities-api) — runtime dependency.
 - [WordPress/mcp-adapter](https://github.com/WordPress/mcp-adapter) — runtime dependency.
 - [ai-factory](https://github.com/lee-to/ai-factory) — companion project for AI dev context.
+
+---
+
+Built and maintained by [SEOmi.ru — Разработка сайтов](https://seomi.ru/).
