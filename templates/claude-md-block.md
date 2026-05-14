@@ -58,10 +58,35 @@ edit it via `seomi-wp-mcp update`, not by hand.
 **Smoke tests:** `wp eval-file wp-content/mu-plugins/seomi-mcp-abilities/tests/smoke.php`
 (currently 44 checks; the count grows as new abilities are added).
 
+## Proactive ability-gap detection
+
+The agent should **proactively** notice when an MCP ability is missing and propose adding
+it — not wait for the user to ask. Triggers:
+
+- About to do 3+ raw `get_post_meta` / `$wpdb` / `wp eval` calls to compose what one
+  ability could return.
+- Falling back to `wp eval`, `wp db query`, or raw `$wpdb` because no `seomi/*` method
+  exists for the operation just requested.
+- Doing the same workaround a second time in the session.
+- Touching a domain the modules don't cover (users, comments, options, menu items) that
+  the task plausibly needs again.
+
+**Always pause and announce before editing.** One short message with:
+- proposed ability name + 1-line description,
+- input/output sketch (3–6 lines),
+- **shared submodule** (universal) or **project-local module** (specific to this client).
+
+Wait for user OK. The submodule is visible on every SEOMI WP project — pushes there are
+global. Project-local additions go to a separate mu-plugin file in this project's repo,
+under a non-`seomi/...` namespace (see mu-plugin README → "Adding your own module").
+
+**Don't propose** for one-off tasks, security-boundary bypasses, or anything specific to
+one client's CPT/ACF schema (that goes project-local, not into the shared submodule).
+
 ## Adding a new ability (agent playbook)
 
-When the user asks for a new ability (e.g. "add a `seomi/get-comments` ability"), follow
-this sequence exactly. The mu-plugin lives in a submodule, so naïve in-place edits land in
+Triggered by either an explicit user request *or* a proactive proposal that the user
+approved. The mu-plugin lives in a submodule, so naïve in-place edits land in
 a detached HEAD and get lost.
 
 **1. Pick the home module.**

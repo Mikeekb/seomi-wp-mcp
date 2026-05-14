@@ -92,10 +92,73 @@ Common methods (full reference in `references/abilities.md`):
 - Skill files (this skill): `.claude/skills/aif-wp-mcp/` — managed by the CLI, regenerated
   on `seomi-wp-mcp update`. Do not hand-edit; changes will be overwritten.
 
+## Proactive gap detection (no explicit user request required)
+
+The agent should **proactively notice when an MCP ability is missing** and propose adding
+it — not wait for the user to ask. The triggers below count as a missing-ability signal:
+
+- About to do **3+ sequential** raw calls (`get_post_meta`, `get_term_meta`, `$wpdb` queries)
+  to compose data that one ability could return as a single payload.
+- Falling back to **`wp eval`**, **`wp db query`**, or **raw `$wpdb`** because no `seomi/*`
+  method exists for the operation the user just asked for.
+- Doing the **same workaround a second time in the same session** for the same kind of
+  read/write.
+- Needing to touch a domain the modules don't cover (users, comments, options, menu items,
+  scheduled events, transients) and that the user's task plausibly needs again later.
+- A bulk operation where the only available abilities require N round-trips (e.g. updating
+  prices for 200 products one by one when a bulk method would obviously help).
+
+**What to do when triggered:**
+
+1. **Pause and announce.** One short message to the user, before any file edit, with:
+   - the name and one-line description of the proposed ability (`seomi/<module>/<verb>` or
+     `seomi/<verb>`),
+   - the input/output sketch (JSON schema in plain text, 3–6 lines),
+   - **whether it should live in the shared mu-plugin** (`Mikeekb/wp-mcp-abilities`,
+     submodule) **or as a project-local module** (separate mu-plugin file inside the parent
+     project — see the *Project-local abilities* section below).
+2. **Wait for user OK.** Do not edit submodule files or open a PR until the user confirms.
+   The submodule is shared across all SEOMI WP projects; pushes there are visible
+   everywhere on the next `submodule update --remote`.
+3. **On OK → follow the playbook** in "Adding a new ability" below.
+
+**When NOT to propose** (silently keep using the workaround instead):
+
+- One-off task you genuinely won't repeat (debugging investigation, one-time data fix).
+- Highly project-specific business logic (`get_field('xyz_partner_id')`, client-only post
+  meta). These belong in a project-local module, never in the shared submodule.
+- Anything that exists only to bypass a permission or capability check — security boundary,
+  not a missing feature.
+- Trivial wrappers that don't reduce round-trips or simplify schemas.
+
+## Shared mu-plugin vs project-local abilities
+
+The mu-plugin `seomi-mcp-abilities` (submodule) ships abilities that make sense for **every**
+SEOMI WordPress project. If a needed ability is universal — propose adding it there.
+
+If it is project-specific (one client's CPT, one client's ACF schema, one project's
+integration), add it as a **project-local module** instead:
+
+1. Create a new mu-plugin file in the parent project at
+   `wp-content/mu-plugins/<project>-mcp-extensions.php` (not inside the submodule).
+2. Implement `Seomi\Mcp\Modules\ModuleInterface` and register it directly via
+   `add_action( 'wp_abilities_api_init', ... )` at priority `20` (after the shared
+   plugin runs). Namespace your abilities under `<project>/...` or `seomi/<project>/...`
+   — never `seomi/...` for project-local additions, to keep the shared namespace clean.
+3. The project-local file is just another mu-plugin and follows the same rules
+   (`with_admin_term_kses`, WC CRUD, etc.) — see the mu-plugin README's
+   "Adding your own module" section for the boilerplate.
+4. Commit it in the parent project's repo, not in the submodule.
+
+Default to project-local whenever the ability touches CPTs, ACF schemas, or business rules
+that aren't shared across SEOMI projects. When in doubt, **ask the user** in the same
+announcement message: "shared or project-local?"
+
 ## Adding a new ability — playbook
 
 Triggers: "добавь абилку <X>", "нужна возможность <X>", "не хватает MCP метода для <X>",
-"add a `seomi/<X>` ability", "extend the mu-plugin to support <X>".
+"add a `seomi/<X>` ability", "extend the mu-plugin to support <X>", *or any proactive
+detection from the section above with the user's OK*.
 
 When the user asks for a new MCP method, treat the standalone mu-plugin repo as the source
 of truth, not the project-local files. The mu-plugin is a git submodule, so the working
