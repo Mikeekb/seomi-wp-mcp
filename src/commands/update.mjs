@@ -112,7 +112,7 @@ export async function updateCommand( opts ) {
 
 	// Regenerate skill files (CLI-managed).
 	logger.step( 'Refreshing aif-wp-mcp skill' );
-	const skillSrc = join( pkgRoot(), 'templates', 'aif-wp-mcp' );
+	const skillSrc = join( pkgRoot(), 'skills', 'aif-wp-mcp' );
 	const skillDest = join( cwd, '.claude/skills/aif-wp-mcp' );
 	await mkdir( skillDest, { recursive: true } );
 	await cp( skillSrc, skillDest, { recursive: true, force: true } );

@@ -55,17 +55,28 @@ That's ~30 minutes of error-prone manual work, repeated for every WP project. `s
 
 ## Using with `ai-factory`
 
-This CLI is designed to live alongside [ai-factory](https://github.com/lee-to/ai-factory):
+This CLI is designed to live alongside [ai-factory](https://github.com/lee-to/ai-factory). Two equivalent paths:
 
-- Run `aif init` first (sets up project-level AI context).
-- Then `seomi-wp-mcp init`. It drops a skill at `.claude/skills/aif-wp-mcp/` that future `/aif` sessions will automatically recognize when they see a `wp-content/` directory.
+**Path A — full installer (recommended for first-time setup):**
 
-The skill installation lives in a separate folder from the `aif-*` skills shipped by ai-factory, so updates to `ai-factory` do **not** overwrite it.
+```
+aif init                          # ai-factory base setup
+seomi-wp-mcp init                 # our integration (creds, mu-plugin, MCP server, etc.)
+```
 
-> **Note (early state):** an upstream PR is planned that will register `aif-wp-mcp` in
-> ai-factory's skill discovery, so `aif init` itself will offer to install it when it
-> detects a WordPress project. Until that lands, run `seomi-wp-mcp init` manually after
-> `aif init`. Track progress at the [seomi-wp-mcp repo](https://github.com/Mikeekb/seomi-wp-mcp).
+`seomi-wp-mcp init` drops the `aif-wp-mcp` skill at `.claude/skills/aif-wp-mcp/`, which subsequent `/aif`-style sessions will recognize whenever they see a `wp-content/` directory.
+
+**Path B — skill-only (when you already have the abilities deployed and just want the AI context):**
+
+```
+npx skills add Mikeekb/seomi-wp-mcp
+```
+
+This installs only the `aif-wp-mcp` skill (from `skills/aif-wp-mcp/` in this repo) — the agent now knows about our abilities, but no `.claude/.env` is written and no MCP server is registered. Useful for read-only sessions where the WP project is already wired up.
+
+> **Discovery from `aif init`:** an issue is open with [vercel-labs/skills](https://github.com/vercel-labs/skills) to index `aif-wp-mcp` on [skills.sh](https://skills.sh) so `aif init`'s `npx skills search` finds it automatically when it detects a WordPress project. Until that lands, the two-step flow above is the way.
+
+The skill lives in its own folder under `.claude/skills/aif-wp-mcp/`, separate from the `aif-*` skills shipped by ai-factory, so updates to `ai-factory` never overwrite it.
 
 ## Configuration
 
@@ -118,8 +129,10 @@ bin/                    Entry point
 src/
   commands/             init, update, doctor
   lib/                  logger, markers, env-writer, claude-mcp, wp-plugin-installer
+skills/
+  aif-wp-mcp/           Standard-path skill (npx skills compatible);
+                        also copied into .claude/skills/ on init by our CLI
 templates/
-  aif-wp-mcp/           Skill copied into .claude/skills/ on init
   claude-md-block.md    Managed block injected into CLAUDE.md
   claude-dotenv/        Reference .env.example
 test/                   Node test runner suites

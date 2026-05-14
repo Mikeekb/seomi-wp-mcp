@@ -170,7 +170,7 @@ if ( is_readable( $f ) ) require_once $f;
 }
 
 async function installAifSkill( cwd ) {
-	const src = join( pkgRoot(), 'templates', 'aif-wp-mcp' );
+	const src = join( pkgRoot(), 'skills', 'aif-wp-mcp' );
 	const dest = join( cwd, '.claude', 'skills', 'aif-wp-mcp' );
 	await mkdir( dest, { recursive: true } );
 	await cp( src, dest, { recursive: true, force: true } );
