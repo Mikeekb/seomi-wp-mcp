@@ -1,0 +1,41 @@
+{
+  "name": "@seomi/wp-mcp",
+  "version": "0.1.0",
+  "description": "Universal installer for SEOMI MCP Abilities — wires WordPress projects to AI agents in one command (mu-plugin, MCP servers, Abilities API, MCP Adapter, ai-factory skill).",
+  "type": "module",
+  "bin": {
+    "seomi-wp-mcp": "./bin/seomi-wp-mcp.mjs"
+  },
+  "files": [
+    "bin",
+    "src",
+    "templates",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test \"test/*.test.mjs\""
+  },
+  "dependencies": {
+    "@inquirer/prompts": "^7.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Mikeekb/seomi-wp-mcp.git"
+  },
+  "homepage": "https://github.com/Mikeekb/seomi-wp-mcp",
+  "license": "SEE LICENSE IN LICENSE",
+  "keywords": [
+    "wordpress",
+    "mcp",
+    "ai-agent",
+    "claude",
+    "ai-factory",
+    "seomi",
+    "abilities-api",
+    "woocommerce"
+  ]
+}
