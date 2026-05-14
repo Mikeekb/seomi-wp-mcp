@@ -153,4 +153,4 @@ Proprietary — © SEOMI. See `LICENSE`.
 
 ---
 
-Built and maintained by [SEOmi.ru — Разработка сайтов](https://seomi.ru/).
+Built and maintained by [SEOmi.ru — Web Development](https://seomi.ru/).
