@@ -1,5 +1,7 @@
 # @seomi/wp-mcp
 
+**English** | [Русский](./README.ru.md)
+
 Universal installer for SEOMI MCP Abilities — wires any WordPress project to AI agents in one command. Inspired by `ai-factory`'s ergonomics: install globally once, then `init` per project.
 
 ```

@@ -1,0 +1,152 @@
+# @seomi/wp-mcp
+
+[English](./README.md) | **Русский**
+
+Универсальный установщик SEOMI MCP Abilities — одна команда подключает любой WordPress-проект к AI-агенту. Идею эргономики позаимствовали у `ai-factory`: ставишь один раз глобально, дальше в каждом проекте — `init`.
+
+```
+npm install -g @seomi/wp-mcp
+cd my-wp-project
+seomi-wp-mcp init
+```
+
+Один `init` сделает следующее:
+
+1. Спросит креды WordPress (URL, пользователь, application password) — локально и опционально для продакшена.
+2. Запишет их в `.claude/.env`, **сохраняя** все остальные ключи и комментарии в файле.
+3. **Автоматически установит** WP-плагины-зависимости (`abilities-api` и `mcp-adapter`) через WP-CLI, если он есть, либо распакует их в `wp-content/plugins/` как фолбэк.
+4. Подключит mu-плагин [`seomi/wp-mcp-abilities`](https://github.com/Mikeekb/wp-mcp-abilities) как git submodule (или через Composer / plain clone — на выбор).
+5. Положит скилл `aif-wp-mcp` в `.claude/skills/`, чтобы будущие `/aif`-сессии его видели.
+6. Вставит managed-блок в `CLAUDE.md` между маркерами `<!-- seomi-wp-mcp:start -->`.
+7. Зарегистрирует MCP-сервер(ы) в твоём Claude (`claude mcp add`), либо напечатает готовую copy-paste команду, если `claude` CLI отсутствует.
+
+Можно перезапускать сколько угодно — **идемпотентно**. Ничего не дублируется, ничего не затирается.
+
+## Зачем это нужно
+
+Когда подключаешь WordPress-проект к Claude или другому AI-агенту, обычно приходится:
+
+- Установить плагин [WP Abilities API](https://github.com/WordPress/abilities-api).
+- Установить плагин [MCP Adapter](https://github.com/WordPress/mcp-adapter).
+- Положить mu-плагин с твоими `seomi/*` (или `your-brand/*`) абилками.
+- Создать application password.
+- Сохранить креды в `.claude/.env`.
+- Зарегистрировать MCP-сервер в Claude через `claude mcp add ...`.
+- Описать абилки в `CLAUDE.md`.
+- Поставить ai-factory скилл, чтобы AI-агенты в первую очередь использовали MCP-абилки.
+
+Это ~30 минут ручной возни, повторяющейся в каждом WP-проекте, и в каждом из этих шагов можно ошибиться. `seomi-wp-mcp init` сворачивает всё это в один интерактивный диалог.
+
+## Команды
+
+| Команда                              | Что делает                                                              |
+|--------------------------------------|-------------------------------------------------------------------------|
+| `seomi-wp-mcp init`                  | Интерактивная первоначальная настройка (см. выше)                       |
+| `seomi-wp-mcp update`                | Подтягивает свежую версию mu-плагина и пересобирает managed-блок CLAUDE.md |
+| `seomi-wp-mcp doctor`                | Диагностика: env, mu-плагин, регистрация MCP-сервера, плагины-зависимости |
+| `seomi-wp-mcp doctor --fix`          | Авто-починка: ставит/активирует Abilities API + MCP Adapter             |
+| `seomi-wp-mcp --verbose <command>`   | Включает debug-логи для любой команды                                   |
+| `seomi-wp-mcp --version`             | Показывает версию                                                        |
+
+## Требования
+
+- **Node 20+** для самого CLI.
+- **PHP 8.0+** + **WordPress 6.4+** на целевом проекте.
+- **WP-CLI** (рекомендуется) — для авто-установки плагинов через зависимости.
+- **Claude Code CLI** — чтобы автоматически делать `claude mcp add`. Без него CLI просто печатает copy-paste команду, которую можно выполнить руками.
+
+## Использование вместе с `ai-factory`
+
+CLI задуман как соседствующий с [ai-factory](https://github.com/lee-to/ai-factory). Два эквивалентных пути:
+
+**Путь А — полный установщик (рекомендуется для первой настройки проекта):**
+
+```
+aif init                          # базовая настройка ai-factory
+seomi-wp-mcp init                 # наша интеграция (креды, mu-плагин, MCP-сервер, и т.д.)
+```
+
+`seomi-wp-mcp init` положит скилл `aif-wp-mcp` в `.claude/skills/aif-wp-mcp/`, и дальнейшие `/aif`-сессии распознают его автоматически когда увидят папку `wp-content/`.
+
+**Путь Б — только скилл (когда абилки уже развёрнуты и хочется только AI-контекст):**
+
+```
+npx skills add Mikeekb/seomi-wp-mcp
+```
+
+Это установит **только** скилл `aif-wp-mcp` (из папки `skills/aif-wp-mcp/` в этом репо) — агент теперь знает про наши абилки, но `.claude/.env` не пишется и MCP-сервер не регистрируется. Подходит для read-only сессий, когда WP-проект уже настроен.
+
+> **Discovery из `aif init`:** запланирован issue в [vercel-labs/skills](https://github.com/vercel-labs/skills) с просьбой проиндексировать `aif-wp-mcp` на [skills.sh](https://skills.sh), чтобы `aif init` сам предлагал нашу интеграцию через `npx skills search` когда увидит WordPress-проект. До того момента — двухшаговый флоу выше.
+
+Скилл живёт в `.claude/skills/aif-wp-mcp/` — отдельной папке от `aif-*` скиллов от ai-factory, так что обновления ai-factory его **никогда не затирают**.
+
+## Конфигурация
+
+Все креды лежат в `.claude/.env` (он в gitignored). Ключи, которыми управляет CLI:
+
+| Ключ                      | Назначение                                            |
+|---------------------------|-------------------------------------------------------|
+| `WP_LOCAL_URL`            | URL локального WordPress                              |
+| `WP_LOCAL_USER`           | Пользователь WP для Basic auth                        |
+| `WP_LOCAL_APP_PASSWORD`   | Application password локального юзера                 |
+| `WP_LOCAL_MCP_SERVER`     | Имя MCP-сервера в конфиге Claude                      |
+| `WP_PROD_URL` / `_USER` / `_APP_PASSWORD` / `_MCP_SERVER` | То же для продакшена                  |
+| `WP_DEPS_REF`             | Опциональный пин для `abilities-api`/`mcp-adapter` (по умолчанию `trunk`) |
+
+Другие ключи (которые ты добавишь сам, ключи `deploy-prod`, third-party токены) — **сохраняются** при повторных запусках `init`.
+
+## Цепочка авто-установки плагинов-зависимостей
+
+Для каждой зависимости `init` пытается стратегии по очереди:
+
+1. **WP-CLI** (`wp plugin install <github-zip> --activate --force`) — предпочтительно, работает локально и удалённо при правильных `--path` / `--ssh`.
+2. **Скачивание zip + распаковка** в `wp-content/plugins/<slug>/` — фолбэк когда WP-CLI нет. В этом режиме **активации не происходит** — CLI попросит активировать вручную из админки.
+3. **Печать команды вручную** — последний резерв, CLI выдаёт готовый сниппет для copy-paste.
+
+По умолчанию берётся `trunk`-ветка `WordPress/abilities-api` и `WordPress/mcp-adapter`. Зафиксировать конкретный ref можно через `--pin-deps <тэг-или-ветка>` или через `WP_DEPS_REF` в `.claude/.env`.
+
+## Контракт идемпотентности
+
+- `.claude/.env` обновляется методом **merge** — ключи, которые ты не трогал (комментарии, креды для deploy, third-party токены) сохраняются.
+- Блок CLAUDE.md обёрнут в маркеры `<!-- seomi-wp-mcp:start --> ... <!-- seomi-wp-mcp:end -->` и регенерируется внутри них; всё что вне маркеров — нетронуто.
+- Регистрация MCP-серверов проверяет `claude mcp list` перед `claude mcp add` — дубликаты не появятся.
+- `wp plugin is-active <slug>` проверяется перед install — повторных установок нет.
+
+Запускай `seomi-wp-mcp init` хоть десять раз подряд — состояние проекта стабильно сходится к одному и тому же.
+
+## Разработка
+
+```bash
+git clone https://github.com/Mikeekb/seomi-wp-mcp.git
+cd seomi-wp-mcp
+npm install
+npm test         # node:test, без дополнительных зависимостей
+node bin/seomi-wp-mcp.mjs --help
+```
+
+Структура:
+
+```
+bin/                    Точка входа
+src/
+  commands/             init, update, doctor
+  lib/                  logger, markers, env-writer, claude-mcp, wp-plugin-installer
+skills/
+  aif-wp-mcp/           Скилл в стандартном пути (совместим с npx skills);
+                        копируется в .claude/skills/ из этого источника на init
+templates/
+  claude-md-block.md    Managed-блок, который вставляется в CLAUDE.md
+  claude-dotenv/        Референс .env.example
+test/                   Тесты под node:test
+```
+
+## Лицензия
+
+Proprietary — © SEOMI. См. `LICENSE`.
+
+## Связанные проекты
+
+- [seomi/wp-mcp-abilities](https://github.com/Mikeekb/wp-mcp-abilities) — mu-плагин, который ставит этот CLI.
+- [WordPress/abilities-api](https://github.com/WordPress/abilities-api) — runtime-зависимость.
+- [WordPress/mcp-adapter](https://github.com/WordPress/mcp-adapter) — runtime-зависимость.
+- [ai-factory](https://github.com/lee-to/ai-factory) — спутник для AI-контекста разработки.
