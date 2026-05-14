@@ -91,3 +91,56 @@ Common methods (full reference in `references/abilities.md`):
 - mu-plugin: `seomi/wp-mcp-abilities` (repo: https://github.com/Mikeekb/wp-mcp-abilities)
 - Skill files (this skill): `.claude/skills/aif-wp-mcp/` — managed by the CLI, regenerated
   on `seomi-wp-mcp update`. Do not hand-edit; changes will be overwritten.
+
+## Adding a new ability — playbook
+
+Triggers: "добавь абилку <X>", "нужна возможность <X>", "не хватает MCP метода для <X>",
+"add a `seomi/<X>` ability", "extend the mu-plugin to support <X>".
+
+When the user asks for a new MCP method, treat the standalone mu-plugin repo as the source
+of truth, not the project-local files. The mu-plugin is a git submodule, so the working
+tree is in detached HEAD by default — naïve in-place edits get lost.
+
+**Step-by-step sequence:**
+
+1. **Pick the home module** in `wp-content/mu-plugins/seomi-mcp-abilities/src/Modules/`:
+   `Posts.php`, `Pages.php`, `Terms.php`, `Media.php`, `WooCommerce.php`. New domain →
+   create a new module file and **register it in `$module_map`** inside
+   `seomi-mcp-abilities.php` (without this step the ability will never be registered).
+2. **Attach HEAD:** `cd wp-content/mu-plugins/seomi-mcp-abilities && git checkout main && git pull --ff-only`.
+3. **Implement** following existing patterns:
+   - `input_schema` is JSON Schema (`properties`, `required`).
+   - `execute_callback` returns the result or `new WP_Error(...)`.
+   - `permission_callback` uses `current_user_can( <capability> )`.
+   - Term-description writes → wrap in `Seomi\Mcp\Core::with_admin_term_kses()`.
+   - Product writes → WC CRUD API (`wc_get_product`, `$product->save()`).
+   - Verbose log: `\seomi_mcp_log( "[<module>] <action> ..." )`.
+4. **Extend smoke test** in `tests/smoke.php`: add the ability name to `$expected` (or
+   `$wc_abilities` for Woo). Optionally add a behavioural check. Run:
+   `wp eval-file wp-content/mu-plugins/seomi-mcp-abilities/tests/smoke.php` — must be
+   `Failures: 0`.
+5. **Push the standalone repo:**
+   ```
+   cd wp-content/mu-plugins/seomi-mcp-abilities
+   git add -A && git commit -m "feat(<module>): add seomi/<name>"
+   git push origin main
+   ```
+6. **Bump the submodule pointer** in the parent project:
+   ```
+   cd <project-root>
+   git add wp-content/mu-plugins/seomi-mcp-abilities
+   git commit -m "chore(mcp-abilities): bump submodule with seomi/<name>"
+   ```
+7. **Verify live:** call `mcp__<server>__mcp-adapter-discover-abilities`. If the new
+   ability isn't visible but WP-CLI smoke is green, PHP-FPM opcache is the suspect —
+   restart PHP-FPM or wait for opcache TTL.
+
+**Hard don'ts** (the agent must enforce these):
+- ❌ Editing submodule files without `git checkout main` first.
+- ❌ Adding a new module file without updating `$module_map`.
+- ❌ Skipping the smoke run before push.
+- ❌ Writing to `$wpdb->term_taxonomy` or `wp_insert_post`-for-products directly.
+
+If the user has already discussed this exact ability before in the conversation, jump
+straight to step 1; otherwise summarize the proposed schema and ask for confirmation
+before opening any files.
