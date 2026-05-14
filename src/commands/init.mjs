@@ -304,6 +304,19 @@ export async function initCommand( opts ) {
 	];
 	process.stdout.write( '\n' + summary.join( '\n' ) + '\n\n' );
 
-	logger.success( 'Done. Next: open a WP-aware Claude Code session in this directory.' );
+	// Next-step hints.
+	const hints = [
+		'Next steps:',
+		'  1. Open a WP-aware Claude Code session in this directory.',
+		'  2. Run `/aif-docs` if you want documentation in docs/ to mention the MCP abilities',
+		'     (this CLI only manages the block inside CLAUDE.md; docs/ is owned by /aif-docs).',
+		'  3. Run `seomi-wp-mcp doctor` to verify everything is wired up correctly.',
+	];
+	if ( depResults?.manualSnippet ) {
+		hints.push( '  4. Finish manual plugin install (see the commands printed above).' );
+	}
+	process.stdout.write( '\n' + hints.join( '\n' ) + '\n' );
+
+	logger.success( 'Done.' );
 	return 0;
 }
