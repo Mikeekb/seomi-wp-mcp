@@ -87,6 +87,28 @@ async function wpCliAvailable( scope ) {
 	return r.code === 0;
 }
 
+/**
+ * Detect the WordPress version of the target site.
+ * Returns a parsed { major, minor, raw } or null if detection fails.
+ *
+ * Used to skip the now-archived `abilities-api` plugin on WP 6.9+, where the
+ * Abilities API is built into core (https://github.com/WordPress/abilities-api
+ * was archived on 2026-02-05 once the API merged into WP core).
+ */
+async function detectWpVersion( scope ) {
+	const r = await runWp( scope, [ 'core', 'version' ] );
+	if ( r.code !== 0 ) return null;
+	const m = r.stdout.trim().match( /^(\d+)\.(\d+)/ );
+	if ( ! m ) return null;
+	return { major: parseInt( m[1], 10 ), minor: parseInt( m[2], 10 ), raw: r.stdout.trim() };
+}
+
+function abilitiesApiInCore( version ) {
+	if ( ! version ) return false;
+	if ( version.major > 6 ) return true;
+	return version.major === 6 && version.minor >= 9;
+}
+
 async function wpCliIsActive( scope, slug ) {
 	const r = await runWp( scope, [ 'plugin', 'is-active', slug ] );
 	return r.code === 0;
@@ -167,6 +189,18 @@ export async function ensurePlugins( cfg ) {
 	const results = [];
 
 	const useWpCli = await wpCliAvailable( scope );
+
+	// Decide whether to skip `abilities-api`: on WP 6.9+ it is part of core
+	// (its standalone plugin repo was archived 2026-02-05).
+	let wpVersion = null;
+	if ( useWpCli ) {
+		wpVersion = await detectWpVersion( scope );
+		if ( wpVersion ) {
+			logger.info( `Detected WordPress ${ wpVersion.raw }` );
+		}
+	}
+	const skipAbilitiesApi = abilitiesApiInCore( wpVersion );
+
 	if ( ! useWpCli ) {
 		const hint = sshSpec
 			? 'WP-CLI failed to connect over SSH. Verify --ssh spec, key auth, and that wp-cli is installed locally.'
@@ -179,6 +213,13 @@ export async function ensurePlugins( cfg ) {
 	}
 
 	for ( const dep of deps ) {
+		// Skip abilities-api on WP 6.9+ — it's bundled into core there.
+		if ( skipAbilitiesApi && dep.slug === 'abilities-api' ) {
+			logger.success( `${ dep.slug } skipped (built into WordPress ${ wpVersion.raw } core)` );
+			results.push( { slug: dep.slug, action: 'skipped-in-core' } );
+			continue;
+		}
+
 		logger.step( `Plugin: ${ dep.label } (${ dep.slug })  [${ scopeLabel }]` );
 
 		if ( useWpCli ) {

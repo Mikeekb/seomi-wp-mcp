@@ -54,6 +54,20 @@ async function wpPluginIsActive( wpRoot, slug, wpCliPharPath ) {
 	return r.code === 0;
 }
 
+/**
+ * Probe a WordPress function via `wp eval` — useful for checking core features
+ * that may not be exposed as plugins (e.g. Abilities API on WP 6.9+ where it's
+ * bundled into core, not a separate plugin slug).
+ */
+async function wpFunctionExists( wpRoot, fn, wpCliPharPath ) {
+	const phpExpr = `echo function_exists("${ fn }") ? "yes" : "no";`;
+	const args = [ 'eval', phpExpr, '--path=' + wpRoot ];
+	const r = wpCliPharPath
+		? await exec( 'php', [ wpCliPharPath, ...args ] )
+		: await exec( 'wp', args, { shell: process.platform === 'win32' } );
+	return r.code === 0 && r.stdout.trim() === 'yes';
+}
+
 async function httpProbe( url, user, password ) {
 	try {
 		const headers = {};
@@ -136,14 +150,23 @@ export async function doctorCommand( opts ) {
 	const wpRoot = existsSync( join( cwd, 'wp-content' ) ) ? cwd : null;
 	let depsOk = true;
 	if ( wpRoot ) {
-		for ( const slug of [ 'abilities-api', 'mcp-adapter' ] ) {
-			const active = await wpPluginIsActive( wpRoot, slug, env?.WP_CLI_PHAR );
-			if ( active ) {
-				report.pass( `WP plugin active: ${ slug }` );
-			} else {
-				depsOk = false;
-				report.fail( `WP plugin NOT active: ${ slug }`, '--fix will try to install via wp-cli or zip' );
-			}
+		// Abilities API: check the function, not the plugin slug (on WP 6.9+ it's
+		// part of core, no plugin exists by that name).
+		const abilitiesOk = await wpFunctionExists( wpRoot, 'wp_register_ability', env?.WP_CLI_PHAR );
+		if ( abilitiesOk ) {
+			report.pass( 'Abilities API available (wp_register_ability exists — plugin or core)' );
+		} else {
+			depsOk = false;
+			report.fail( 'Abilities API NOT available — wp_register_ability undefined', '--fix will try to install abilities-api plugin (WP < 6.9 only)' );
+		}
+
+		// MCP Adapter remains a plugin in all current WP versions.
+		const adapterOk = await wpPluginIsActive( wpRoot, 'mcp-adapter', env?.WP_CLI_PHAR );
+		if ( adapterOk ) {
+			report.pass( 'WP plugin active: mcp-adapter' );
+		} else {
+			depsOk = false;
+			report.fail( 'WP plugin NOT active: mcp-adapter', '--fix will try to install via wp-cli or zip' );
 		}
 	} else {
 		report.warn( 'wp-content/ not found here — skipping plugin checks (this may be a separate WP install)' );

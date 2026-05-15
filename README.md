@@ -105,6 +105,8 @@ For each dependency, `init` tries strategies in order:
 
 The default refs are the `trunk` branches of `WordPress/abilities-api` and `WordPress/mcp-adapter`. Pin to a stable ref with `--pin-deps <tag-or-branch>` or set `WP_DEPS_REF` in `.claude/.env`.
 
+> **WP 6.9+ note:** the Abilities API was merged into WordPress core in 6.9 (its standalone plugin repo was archived 2026-02-05). The installer detects the WP version via `wp core version` and **skips** the `abilities-api` plugin on 6.9+ — only `mcp-adapter` is installed. On WP 6.8 both are installed (Abilities API as a separate plugin, since the API isn't in core yet).
+
 ## Idempotency contract
 
 - `.claude/.env` is merged — keys you didn't touch (comments, deploy creds, third-party tokens) are preserved.
