@@ -23,7 +23,12 @@ import { spawn } from 'node:child_process';
 import { logger } from '../lib/logger.mjs';
 import { mergeEnv } from '../lib/env-writer.mjs';
 import { insertOrUpdate as updateMarkerBlock } from '../lib/markers.mjs';
-import { addServer as claudeAddServer } from '../lib/claude-mcp.mjs';
+import {
+	addServerEntry as claudeAddServerEntry,
+	buildStdioLocalConfig,
+	buildStdioSshConfig,
+	composeSshSpec,
+} from '../lib/claude-mcp.mjs';
 import { ensurePlugins } from '../lib/wp-plugin-installer.mjs';
 
 const MU_PLUGIN_REPO_URL = 'https://github.com/Mikeekb/wp-mcp-abilities.git';
@@ -44,6 +49,35 @@ function exec( cmd, args, opts = {} ) {
 		child.on( 'error', ( err ) => resolve( { code: -1, stdout, stderr: stderr + err.message } ) );
 		child.on( 'close', ( code ) => resolve( { code: code ?? 0, stdout, stderr } ) );
 	} );
+}
+
+/**
+ * Try to find the WP-CLI phar path on the local machine.
+ * Returns an absolute path string or null.
+ */
+async function detectWpCliPhar() {
+	// 1. Common Windows install path.
+	if ( process.platform === 'win32' ) {
+		for ( const p of [ 'C:/wp-cli/wp-cli.phar', 'C:\\wp-cli\\wp-cli.phar' ] ) {
+			if ( existsSync( p ) ) return p.replace( /\\/g, '/' );
+		}
+	}
+	// 2. Look for `wp` in PATH and follow it.
+	const which = process.platform === 'win32' ? [ 'where', 'wp' ] : [ 'which', 'wp' ];
+	const r = await exec( which[ 0 ], [ which[ 1 ] ] );
+	if ( r.code === 0 ) {
+		const first = r.stdout.split( /\r?\n/ ).map( ( s ) => s.trim() ).filter( Boolean )[ 0 ];
+		if ( first && existsSync( first ) ) {
+			const text = await readFile( first, 'utf8' ).catch( () => '' );
+			const m = text.match( /([^\s"']+wp-cli(?:-[\d.]+)?\.phar)/ );
+			if ( m ) return m[ 1 ].replace( /\\/g, '/' );
+		}
+	}
+	// 3. Common Linux/Mac paths.
+	for ( const p of [ '/usr/local/bin/wp-cli.phar', '/usr/bin/wp-cli.phar' ] ) {
+		if ( existsSync( p ) ) return p;
+	}
+	return null;
 }
 
 function detectWpRoot( cwd ) {
@@ -82,6 +116,7 @@ async function askCredentials() {
 	} );
 
 	let prod = {};
+	let prodSsh = null;
 	if ( wantProd ) {
 		logger.step( 'WordPress credentials — PRODUCTION' );
 		prod.WP_PROD_URL = await input( {
@@ -97,17 +132,50 @@ async function askCredentials() {
 			mask: '*',
 		} );
 		prod.WP_PROD_MCP_SERVER = await input( {
-			message: 'Production MCP server name:',
+			message: 'Production MCP server name (in .mcp.json):',
 			default: 'wordpress-prod',
 		} );
+
+		const wantSsh = await confirm( {
+			message: 'Configure SSH to prod (for the prod MCP server and remote plugin install)?',
+			default: true,
+		} );
+		if ( wantSsh ) {
+			logger.step( 'SSH access to production' );
+			prod.WP_PROD_SSH_HOST = await input( {
+				message: 'Prod SSH host:',
+				validate: ( v ) => !! v || 'Required',
+			} );
+			prod.WP_PROD_SSH_USER = await input( {
+				message: 'Prod SSH user:',
+				default: 'ai-agent',
+			} );
+			prod.WP_PROD_SSH_PORT = await input( {
+				message: 'Prod SSH port (blank = default 22):',
+				default: '',
+			} );
+			prod.WP_PROD_WP_ROOT = await input( {
+				message: 'Absolute WP root path on prod (e.g. /home/user/site/public_html):',
+				validate: ( v ) => v.startsWith( '/' ) || 'Must be an absolute path starting with /',
+			} );
+			prodSsh = {
+				sshHost: prod.WP_PROD_SSH_HOST,
+				sshUser: prod.WP_PROD_SSH_USER,
+				sshPort: prod.WP_PROD_SSH_PORT || '',
+				wpRoot: prod.WP_PROD_WP_ROOT,
+			};
+		}
 	}
 
 	return {
-		WP_LOCAL_URL,
-		WP_LOCAL_USER,
-		WP_LOCAL_APP_PASSWORD,
-		WP_LOCAL_MCP_SERVER,
-		...prod,
+		env: {
+			WP_LOCAL_URL,
+			WP_LOCAL_USER,
+			WP_LOCAL_APP_PASSWORD,
+			WP_LOCAL_MCP_SERVER,
+			...prod,
+		},
+		prodSsh,
 	};
 }
 
@@ -202,7 +270,20 @@ export async function initCommand( opts ) {
 	}
 	logger.info( `Detected WP root: ${ wpRoot }` );
 
-	const env = await askCredentials();
+	const { env, prodSsh } = await askCredentials();
+
+	// WP-CLI phar path — required for the local stdio MCP server config.
+	const detectedPhar = await detectWpCliPhar();
+	if ( detectedPhar ) {
+		logger.info( `Detected WP-CLI phar at ${ detectedPhar }` );
+	} else {
+		logger.warn( 'Could not auto-detect WP-CLI phar path.' );
+	}
+	const wpCliPharPath = await input( {
+		message: 'Absolute path to wp-cli.phar (used by the stdio MCP server):',
+		default: detectedPhar || ( process.platform === 'win32' ? 'C:/wp-cli/wp-cli.phar' : '/usr/local/bin/wp-cli.phar' ),
+		validate: ( v ) => existsSync( v ) || `Not found: ${ v }`,
+	} );
 
 	const muMode = await select( {
 		message: 'How should the mu-plugin be connected?',
@@ -215,9 +296,16 @@ export async function initCommand( opts ) {
 	} );
 
 	const installDeps = await confirm( {
-		message: 'Auto-install WordPress plugin dependencies (Abilities API + MCP Adapter)?',
+		message: 'Auto-install WordPress plugin dependencies on LOCAL (Abilities API + MCP Adapter)?',
 		default: true,
 	} );
+
+	const installDepsProd = prodSsh
+		? await confirm( {
+			message: 'Also auto-install plugin dependencies on PROD (via WP-CLI --ssh)?',
+			default: true,
+		} )
+		: false;
 
 	const installSkill = await confirm( {
 		message: 'Install the aif-wp-mcp skill into .claude/skills/ for ai-factory?',
@@ -264,56 +352,73 @@ export async function initCommand( opts ) {
 		claudeMdRes = await updateClaudeMd( cwd, env );
 	}
 
-	// 6. Register MCP servers in Claude
-	logger.step( 'Registering MCP servers in Claude' );
-	const localRes = await claudeAddServer( {
-		name: env.WP_LOCAL_MCP_SERVER,
-		baseUrl: env.WP_LOCAL_URL,
-		user: env.WP_LOCAL_USER,
-		password: env.WP_LOCAL_APP_PASSWORD,
-	} );
-	logger.info( `Local MCP server: ${ localRes.ok ? localRes.action : 'NOT REGISTERED — ' + localRes.reason }` );
-	if ( ! localRes.ok && localRes.manualCommand ) {
-		logger.warn( 'Run manually:\n  ' + localRes.manualCommand );
-	}
-
-	let prodRes = null;
-	if ( env.WP_PROD_URL ) {
-		prodRes = await claudeAddServer( {
-			name: env.WP_PROD_MCP_SERVER,
-			baseUrl: env.WP_PROD_URL,
-			user: env.WP_PROD_USER,
-			password: env.WP_PROD_APP_PASSWORD,
-		} );
-		logger.info( `Prod MCP server: ${ prodRes.ok ? prodRes.action : 'NOT REGISTERED — ' + prodRes.reason }` );
-		if ( ! prodRes.ok && prodRes.manualCommand ) {
-			logger.warn( 'Run manually:\n  ' + prodRes.manualCommand );
+	// 6. Install plugin deps on PROD via WP-CLI --ssh (if asked).
+	let prodDepResults = null;
+	if ( installDepsProd && prodSsh ) {
+		logger.step( 'Installing WP plugin dependencies on PROD (via SSH)' );
+		const sshSpec = composeSshSpec( prodSsh );
+		prodDepResults = await ensurePlugins( { sshSpec, ref: opts[ 'pin-deps' ] } );
+		if ( prodDepResults.manualSnippet ) {
+			logger.warn( 'Some prod dependencies could not be installed automatically.' );
+			logger.warn( 'Manual commands:\n' + prodDepResults.manualSnippet );
 		}
 	}
 
-	// 7. Summary
+	// 7. Write project-scope MCP server entries to .mcp.json.
+	//    LOCAL  = stdio + WP-CLI mcp-adapter serve --path=<wpRoot>
+	//    PROD   = stdio + WP-CLI mcp-adapter serve --ssh=<spec>
+	logger.step( 'Writing project-scope .mcp.json' );
+	const localCfg = buildStdioLocalConfig( {
+		wpCliPharPath,
+		wpRoot,
+		user: env.WP_LOCAL_USER,
+	} );
+	const localRes = await claudeAddServerEntry( cwd, env.WP_LOCAL_MCP_SERVER, localCfg );
+
+	let prodRes = null;
+	if ( prodSsh && env.WP_PROD_MCP_SERVER ) {
+		const sshSpec = composeSshSpec( prodSsh );
+		const prodCfg = buildStdioSshConfig( {
+			wpCliPharPath,
+			sshSpec,
+			user: env.WP_PROD_USER,
+		} );
+		prodRes = await claudeAddServerEntry( cwd, env.WP_PROD_MCP_SERVER, prodCfg );
+	} else if ( env.WP_PROD_URL && ! prodSsh ) {
+		logger.warn( 'Prod URL given but no SSH config — skipping prod MCP server registration. (Stdio over SSH is the only supported prod transport currently.)' );
+	}
+
+	// 8. Summary
 	logger.step( 'Summary' );
 	const summary = [
 		`  .claude/.env             — ${ envRes.created ? 'created' : 'updated' } (+${ envRes.added.length } / ~${ envRes.updated.length })`,
 		`  mu-plugin (${ muMode })${ ' '.repeat( Math.max( 0, 12 - muMode.length ) ) }— ${ muRes.action }`,
-		`  WP plugin deps           — ${ depResults ? depResults.results.map( r => r.slug + ':' + r.action ).join( ', ' ) : 'skipped' }`,
+		`  WP plugin deps (local)   — ${ depResults ? depResults.results.map( r => r.slug + ':' + r.action ).join( ', ' ) : 'skipped' }`,
+		`  WP plugin deps (prod)    — ${ prodDepResults ? prodDepResults.results.map( r => r.slug + ':' + r.action ).join( ', ' ) : 'skipped' }`,
 		`  aif-wp-mcp skill         — ${ skillRes ? 'installed' : 'skipped' }`,
 		`  CLAUDE.md block          — ${ claudeMdRes ? claudeMdRes.action : 'skipped' }`,
-		`  MCP server (local)       — ${ localRes.ok ? localRes.action : 'manual needed' }`,
-		`  MCP server (prod)        — ${ prodRes ? ( prodRes.ok ? prodRes.action : 'manual needed' ) : 'skipped' }`,
+		`  .mcp.json (local server) — ${ localRes.action } (${ env.WP_LOCAL_MCP_SERVER })`,
+		`  .mcp.json (prod server)  — ${ prodRes ? prodRes.action + ' (' + env.WP_PROD_MCP_SERVER + ')' : 'skipped' }`,
 	];
 	process.stdout.write( '\n' + summary.join( '\n' ) + '\n\n' );
 
 	// Next-step hints.
 	const hints = [
 		'Next steps:',
-		'  1. Open a WP-aware Claude Code session in this directory.',
-		'  2. Run `/aif-docs` if you want documentation in docs/ to mention the MCP abilities',
+		'  1. Restart Claude Code in this directory so it picks up the new .mcp.json.',
+		'  2. If you previously had a user-scope `wordpress-local` or `wordpress-prod` server',
+		'     pointing at another project, remove it: `claude mcp remove <name> --scope user`.',
+		'     (Project-scope entry from this .mcp.json takes precedence, but stale user-scope',
+		'     entries cause confusion in Claude Code GUI.)',
+		'  3. Run `/aif-docs` if you want documentation in docs/ to mention the MCP abilities',
 		'     (this CLI only manages the block inside CLAUDE.md; docs/ is owned by /aif-docs).',
-		'  3. Run `seomi-wp-mcp doctor` to verify everything is wired up correctly.',
+		'  4. Run `seomi-wp-mcp doctor` to verify everything is wired up correctly.',
 	];
 	if ( depResults?.manualSnippet ) {
-		hints.push( '  4. Finish manual plugin install (see the commands printed above).' );
+		hints.push( '  5. Finish manual local plugin install (see commands printed above).' );
+	}
+	if ( prodDepResults?.manualSnippet ) {
+		hints.push( '  6. Finish manual prod plugin install (see commands printed above).' );
 	}
 	process.stdout.write( '\n' + hints.join( '\n' ) + '\n' );
 

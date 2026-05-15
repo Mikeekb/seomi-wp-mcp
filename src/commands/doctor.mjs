@@ -16,7 +16,7 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import { logger } from '../lib/logger.mjs';
-import { hasServer } from '../lib/claude-mcp.mjs';
+import { readMcpJson } from '../lib/claude-mcp.mjs';
 import { ensurePlugins } from '../lib/wp-plugin-installer.mjs';
 
 const MU_PLUGIN_HEADER = 'wp-content/mu-plugins/seomi-mcp-abilities/seomi-mcp-abilities.php';
@@ -146,13 +146,26 @@ export async function doctorCommand( opts ) {
 		report.warn( 'wp-content/ not found here — skipping plugin checks (this may be a separate WP install)' );
 	}
 
-	// 5. MCP server registered
+	// 5. MCP server registered in project-scope .mcp.json
 	if ( env?.WP_LOCAL_MCP_SERVER ) {
-		const ok = await hasServer( env.WP_LOCAL_MCP_SERVER );
-		if ( ok ) {
-			report.pass( `MCP server registered in Claude: ${ env.WP_LOCAL_MCP_SERVER }` );
-		} else {
-			report.warn( `MCP server not registered in Claude: ${ env.WP_LOCAL_MCP_SERVER }`, 'Run `seomi-wp-mcp init` or `claude mcp add` manually' );
+		try {
+			const mcp = await readMcpJson( cwd );
+			const entry = mcp.mcpServers?.[ env.WP_LOCAL_MCP_SERVER ];
+			if ( entry ) {
+				report.pass( `MCP server (project-scope): ${ env.WP_LOCAL_MCP_SERVER } in .mcp.json` );
+			} else {
+				report.warn( `MCP server missing from .mcp.json: ${ env.WP_LOCAL_MCP_SERVER }`, 'Run `seomi-wp-mcp init` to register' );
+			}
+			if ( env.WP_PROD_MCP_SERVER ) {
+				const prodEntry = mcp.mcpServers?.[ env.WP_PROD_MCP_SERVER ];
+				if ( prodEntry ) {
+					report.pass( `Prod MCP server: ${ env.WP_PROD_MCP_SERVER } in .mcp.json` );
+				} else {
+					report.warn( `Prod MCP server missing from .mcp.json: ${ env.WP_PROD_MCP_SERVER }` );
+				}
+			}
+		} catch ( err ) {
+			report.fail( `.mcp.json is malformed`, err.message );
 		}
 	}
 

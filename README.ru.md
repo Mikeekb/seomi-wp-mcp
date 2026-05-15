@@ -18,7 +18,7 @@ seomi-wp-mcp init
 4. Подключит mu-плагин [`seomi/wp-mcp-abilities`](https://github.com/Mikeekb/wp-mcp-abilities) как git submodule (или через Composer / plain clone — на выбор).
 5. Положит скилл `aif-wp-mcp` в `.claude/skills/`, чтобы будущие `/aif`-сессии его видели.
 6. Вставит managed-блок в `CLAUDE.md` между маркерами `<!-- seomi-wp-mcp:start -->`.
-7. Зарегистрирует MCP-сервер(ы) в твоём Claude (`claude mcp add`), либо напечатает готовую copy-paste команду, если `claude` CLI отсутствует.
+7. Запишет **project-scope** записи MCP-серверов в `.mcp.json` в корне проекта (каждый проект видит свой `wordpress-local`/`wordpress-prod`, никаких пересечений). Локальный сервер — stdio через WP-CLI `mcp-adapter serve`; прод — тот же транспорт, но с `--ssh=`, так что команды выполняются на проде через SSH.
 
 Можно перезапускать сколько угодно — **идемпотентно**. Ничего не дублируется, ничего не затирается.
 

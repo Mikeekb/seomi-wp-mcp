@@ -50,20 +50,30 @@ function exec( cmd, args, opts = {} ) {
 	} );
 }
 
-async function wpCliAvailable( wpRoot ) {
-	const r = await exec( 'wp', [ '--info', '--path=' + wpRoot ] );
-	logger.debug( `wp-plugin-installer: wp --info exit=${ r.code } at ${ wpRoot }` );
+/**
+ * Build WP-CLI scope flags: either --path=<wpRoot> (local) or --ssh=<spec> (remote).
+ * Exactly one must be provided. SSH takes precedence if both are set.
+ */
+function wpScopeFlags( { wpRoot, sshSpec } ) {
+	if ( sshSpec ) return [ '--ssh=' + sshSpec ];
+	if ( wpRoot ) return [ '--path=' + wpRoot ];
+	return [];
+}
+
+async function wpCliAvailable( scope ) {
+	const r = await exec( 'wp', [ '--info', ...wpScopeFlags( scope ) ] );
+	logger.debug( `wp-plugin-installer: wp --info exit=${ r.code } at ${ scope.sshSpec || scope.wpRoot }` );
 	return r.code === 0;
 }
 
-async function wpCliIsActive( wpRoot, slug ) {
-	const r = await exec( 'wp', [ 'plugin', 'is-active', slug, '--path=' + wpRoot ] );
+async function wpCliIsActive( scope, slug ) {
+	const r = await exec( 'wp', [ 'plugin', 'is-active', slug, ...wpScopeFlags( scope ) ] );
 	return r.code === 0;
 }
 
-async function wpCliInstall( wpRoot, source ) {
+async function wpCliInstall( scope, source ) {
 	logger.info( `wp-cli: installing ${ source }` );
-	const r = await exec( 'wp', [ 'plugin', 'install', source, '--activate', '--force', '--path=' + wpRoot ] );
+	const r = await exec( 'wp', [ 'plugin', 'install', source, '--activate', '--force', ...wpScopeFlags( scope ) ] );
 	if ( r.code !== 0 ) {
 		logger.debug( `wp-cli stderr: ${ r.stderr.trim() }` );
 	}
@@ -87,54 +97,74 @@ function buildZipUrl( spec ) {
 	return `https://github.com/${ spec.githubRepo }/archive/refs/heads/${ ref }.zip`;
 }
 
-function buildManualSnippet( deps, wpRoot ) {
+function buildManualSnippet( deps, wpRoot, sshSpec ) {
+	const scopeFlag = sshSpec ? ` --ssh=${ sshSpec }` : ( wpRoot ? ` --path=${ wpRoot }` : '' );
 	const lines = [];
 	lines.push( '# Manual install of WordPress plugin dependencies:' );
 	for ( const dep of deps ) {
 		const zip = buildZipUrl( dep );
 		lines.push( `# ${ dep.label } (${ dep.slug })` );
-		lines.push( `wp plugin install ${ zip } --activate --force${ wpRoot ? ' --path=' + wpRoot : '' }` );
+		lines.push( `wp plugin install ${ zip } --activate --force${ scopeFlag }` );
 	}
 	return lines.join( '\n' );
 }
 
 /**
- * Install dependency plugins on a local WordPress site.
+ * Install dependency plugins on a WordPress site (local or via SSH).
  *
  * @param {Object} cfg
- * @param {string} cfg.wpRoot                 Absolute path to WP root (containing wp-config.php).
+ * @param {string} [cfg.wpRoot]               Absolute path to WP root (for local).
+ * @param {string} [cfg.sshSpec]              WP-CLI --ssh= spec (for remote / prod).
+ *                                            Format: [user@]host[:port][/path]. If set,
+ *                                            wpRoot is ignored and the zip-download
+ *                                            fallback is disabled (cannot drop files on
+ *                                            a remote filesystem without extra protocol).
  * @param {Array}  [cfg.deps=DEFAULT_DEPS]    Plugin specs.
  * @param {string} [cfg.ref]                  Override git ref for all deps (e.g. 'main' or a tag).
  * @returns {Promise<{ results: Array, manualSnippet: string|null }>}
  */
 export async function ensurePlugins( cfg ) {
 	const wpRoot = cfg.wpRoot;
+	const sshSpec = cfg.sshSpec;
+	const scope = { wpRoot, sshSpec };
+	const scopeLabel = sshSpec ? `ssh:${ sshSpec }` : wpRoot;
 	const deps = ( cfg.deps || DEFAULT_DEPS ).map( ( d ) => ( cfg.ref ? { ...d, ref: cfg.ref } : d ) );
 	const results = [];
 
-	const useWpCli = await wpCliAvailable( wpRoot );
+	const useWpCli = await wpCliAvailable( scope );
 	if ( ! useWpCli ) {
-		logger.warn( `WP-CLI not available at ${ wpRoot } — will fall back to zip download (no activation).` );
+		const hint = sshSpec
+			? 'WP-CLI failed to connect over SSH. Verify --ssh spec, key auth, and that wp-cli is installed locally.'
+			: 'WP-CLI not available locally — will fall back to zip download (no activation).';
+		logger.warn( `${ scopeLabel }: ${ hint }` );
+		if ( sshSpec ) {
+			// Cannot zip-fallback against a remote filesystem; bail with manual snippet.
+			return { results: deps.map( ( d ) => ( { slug: d.slug, action: 'failed', error: 'wp-cli/ssh not available' } ) ), manualSnippet: buildManualSnippet( deps, wpRoot, sshSpec ) };
+		}
 	}
 
 	for ( const dep of deps ) {
-		logger.step( `Plugin: ${ dep.label } (${ dep.slug })` );
+		logger.step( `Plugin: ${ dep.label } (${ dep.slug })  [${ scopeLabel }]` );
 
 		if ( useWpCli ) {
-			const active = await wpCliIsActive( wpRoot, dep.slug );
+			const active = await wpCliIsActive( scope, dep.slug );
 			if ( active ) {
 				logger.success( `${ dep.slug } already active — skipping` );
 				results.push( { slug: dep.slug, action: 'already-active' } );
 				continue;
 			}
 			const zip = buildZipUrl( dep );
-			const ok = await wpCliInstall( wpRoot, zip );
+			const ok = await wpCliInstall( scope, zip );
 			if ( ok ) {
 				logger.success( `${ dep.slug } installed and activated via WP-CLI` );
-				results.push( { slug: dep.slug, action: 'installed', strategy: 'wp-cli' } );
+				results.push( { slug: dep.slug, action: 'installed', strategy: sshSpec ? 'wp-cli-ssh' : 'wp-cli' } );
 				continue;
 			}
 			logger.warn( `WP-CLI install failed for ${ dep.slug } — falling back to zip download` );
+			if ( sshSpec ) {
+				results.push( { slug: dep.slug, action: 'failed', error: 'wp-cli install failed and zip fallback not available over ssh' } );
+				continue;
+			}
 		}
 
 		const pluginsDir = join( wpRoot, 'wp-content', 'plugins' );
