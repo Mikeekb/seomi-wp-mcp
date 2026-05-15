@@ -46,8 +46,19 @@ async function readEnv( cwd ) {
 	return out;
 }
 
-async function wpPluginIsActive( wpRoot, slug, wpCliPharPath ) {
-	const args = [ 'plugin', 'is-active', slug, '--path=' + wpRoot ];
+/**
+ * Build the common WP-CLI scope flags. Always passes --path; when a site URL
+ * is known, also passes --url so multisite installs (which require a current
+ * blog context for `wp eval`) work without "domain [] is not a valid domain".
+ */
+function wpScopeArgs( wpRoot, siteUrl ) {
+	const out = [ '--path=' + wpRoot ];
+	if ( siteUrl ) out.push( '--url=' + siteUrl );
+	return out;
+}
+
+async function wpPluginIsActive( wpRoot, slug, wpCliPharPath, siteUrl ) {
+	const args = [ 'plugin', 'is-active', slug, ...wpScopeArgs( wpRoot, siteUrl ) ];
 	const r = wpCliPharPath
 		? await exec( 'php', [ wpCliPharPath, ...args ] )
 		: await exec( 'wp', args, { shell: process.platform === 'win32' } );
@@ -58,48 +69,66 @@ async function wpPluginIsActive( wpRoot, slug, wpCliPharPath ) {
  * Probe a WordPress function via `wp eval` — useful for checking core features
  * that may not be exposed as plugins (e.g. Abilities API on WP 6.9+ where it's
  * bundled into core, not a separate plugin slug).
+ *
+ * On multisite installs `wp eval` MUST receive --url=<site> or it bails out
+ * before loading core hooks; passing siteUrl here makes the probe robust on
+ * both single-site and multisite.
  */
-async function wpFunctionExists( wpRoot, fn, wpCliPharPath ) {
+async function wpFunctionExists( wpRoot, fn, wpCliPharPath, siteUrl ) {
 	const phpExpr = `echo function_exists("${ fn }") ? "yes" : "no";`;
-	const args = [ 'eval', phpExpr, '--path=' + wpRoot ];
+	const args = [ 'eval', phpExpr, ...wpScopeArgs( wpRoot, siteUrl ) ];
 	const r = wpCliPharPath
 		? await exec( 'php', [ wpCliPharPath, ...args ] )
 		: await exec( 'wp', args, { shell: process.platform === 'win32' } );
-	return r.code === 0 && r.stdout.trim() === 'yes';
+	return r.code === 0 && r.stdout.trim().endsWith( 'yes' );
 }
 
 /**
  * Lenient HTTP probe — diagnostic only (not used for real MCP traffic, which
- * runs over stdio). Accepts self-signed TLS certs because local WP installs
- * (`https://os-foo/`) almost always use them, and the probe is for "is the
- * site reachable at all", not for trust verification.
+ * runs over stdio). Uses node:https / node:http directly so we can pass
+ * `rejectUnauthorized: false` — local WP installs (`https://os-foo/`) almost
+ * always serve self-signed certs, and the probe is for "is the site reachable
+ * at all", not for trust verification.
+ *
+ * (Earlier versions tried `import('undici')` to configure built-in fetch.
+ * That import fails on most Node setups because undici isn't exposed as a
+ * regular importable package — it's an internal module. Fell back silently
+ * to strict-TLS fetch and gave false-negative HTTP 0 results.)
  */
 async function httpProbe( url, user, password ) {
-	const isHttps = url.startsWith( 'https://' );
-	let dispatcher;
-	if ( isHttps ) {
-		try {
-			const { Agent } = await import( 'undici' );
-			dispatcher = new Agent( { connect: { rejectUnauthorized: false } } );
-		} catch ( err ) {
-			// undici not available — proceed without dispatcher, may fail on self-signed.
-			logger.debug( `httpProbe: undici unavailable (${ err.message })` );
-		}
+	const u = new URL( url );
+	const https = u.protocol === 'https:';
+	const lib = https ? await import( 'node:https' ) : await import( 'node:http' );
+
+	const headers = {};
+	if ( user && password ) {
+		const auth = Buffer.from( `${ user }:${ password.replace( /\s+/g, '' ) }` ).toString( 'base64' );
+		headers.Authorization = `Basic ${ auth }`;
 	}
 
-	try {
-		const headers = {};
-		if ( user && password ) {
-			const auth = Buffer.from( `${ user }:${ password.replace( /\s+/g, '' ) }` ).toString( 'base64' );
-			headers.Authorization = `Basic ${ auth }`;
-		}
-		const opts = { headers, redirect: 'manual' };
-		if ( dispatcher ) opts.dispatcher = dispatcher;
-		const resp = await fetch( url, opts );
-		return { ok: resp.ok, status: resp.status };
-	} catch ( err ) {
-		return { ok: false, status: 0, error: err.message };
-	}
+	const opts = {
+		method: 'GET',
+		hostname: u.hostname,
+		port: u.port || ( https ? 443 : 80 ),
+		path: u.pathname + ( u.search || '' ),
+		headers,
+		timeout: 8000,
+	};
+	if ( https ) opts.rejectUnauthorized = false;
+
+	return new Promise( ( resolve ) => {
+		const req = lib.request( opts, ( res ) => {
+			res.resume(); // drain to free socket
+			const status = res.statusCode ?? 0;
+			resolve( { ok: status >= 200 && status < 400, status } );
+		} );
+		req.on( 'error', ( err ) => resolve( { ok: false, status: 0, error: err.message } ) );
+		req.on( 'timeout', () => {
+			req.destroy();
+			resolve( { ok: false, status: 0, error: 'timeout' } );
+		} );
+		req.end();
+	} );
 }
 
 class Report {
@@ -170,9 +199,10 @@ export async function doctorCommand( opts ) {
 	const wpRoot = existsSync( join( cwd, 'wp-content' ) ) ? cwd : null;
 	let depsOk = true;
 	if ( wpRoot ) {
+		const siteUrl = env?.WP_LOCAL_URL || '';
 		// Abilities API: check the function, not the plugin slug (on WP 6.9+ it's
 		// part of core, no plugin exists by that name).
-		const abilitiesOk = await wpFunctionExists( wpRoot, 'wp_register_ability', env?.WP_CLI_PHAR );
+		const abilitiesOk = await wpFunctionExists( wpRoot, 'wp_register_ability', env?.WP_CLI_PHAR, siteUrl );
 		if ( abilitiesOk ) {
 			report.pass( 'Abilities API available (wp_register_ability exists — plugin or core)' );
 		} else {
@@ -181,7 +211,7 @@ export async function doctorCommand( opts ) {
 		}
 
 		// MCP Adapter remains a plugin in all current WP versions.
-		const adapterOk = await wpPluginIsActive( wpRoot, 'mcp-adapter', env?.WP_CLI_PHAR );
+		const adapterOk = await wpPluginIsActive( wpRoot, 'mcp-adapter', env?.WP_CLI_PHAR, siteUrl );
 		if ( adapterOk ) {
 			report.pass( 'WP plugin active: mcp-adapter' );
 		} else {
