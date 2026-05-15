@@ -265,6 +265,10 @@ export async function ensurePlugins( cfg ) {
 			}
 			await rm( tmpZip, { force: true } );
 
+			// GitHub-source plugins usually need `composer install` before they run
+			// (their vendor/ is not committed). Best-effort here.
+			await maybeRunComposerInstall( targetDir );
+
 			// If WP-CLI is reachable, finish the job with `plugin activate`.
 			if ( useWpCli ) {
 				const activated = await wpCliActivate( scope, dep.slug );
@@ -292,9 +296,23 @@ export async function ensurePlugins( cfg ) {
 
 /**
  * Best-effort zip extraction using PowerShell (Windows) or `unzip` (POSIX).
- * Returns the name of the top-level directory in the archive (or null if unknown).
+ * Returns the name of the top-level directory the archive created in destDir
+ * (e.g. "mcp-adapter-trunk"), or null if detection failed.
+ *
+ * Detection: snapshot directory listing before extraction, diff after. Earlier
+ * versions used "longest name in destDir" as a heuristic, which catastrophically
+ * mis-identified the new dir whenever any pre-existing plugin name was longer
+ * than the new one (bug fixed in 0.1.6).
  */
 async function unzipTo( zipPath, destDir ) {
+	const before = new Set();
+	try {
+		const entries = await readdir( destDir, { withFileTypes: true } );
+		for ( const e of entries ) if ( e.isDirectory() ) before.add( e.name );
+	} catch ( err ) {
+		logger.debug( `unzipTo: readdir(before) failed: ${ err.message }` );
+	}
+
 	if ( process.platform === 'win32' ) {
 		const psCmd = `Expand-Archive -LiteralPath '${ zipPath.replace( /'/g, "''" ) }' -DestinationPath '${ destDir.replace( /'/g, "''" ) }' -Force`;
 		const r = await exec( 'powershell.exe', [ '-NoProfile', '-Command', psCmd ] );
@@ -303,13 +321,46 @@ async function unzipTo( zipPath, destDir ) {
 		const r = await exec( 'unzip', [ '-o', zipPath, '-d', destDir ] );
 		if ( r.code !== 0 ) throw new Error( `unzip failed: ${ r.stderr.trim() || 'exit ' + r.code }` );
 	}
-	// Detect the top-level dir created by the archive (e.g. abilities-api-trunk).
-	const entries = await readdir( destDir, { withFileTypes: true } );
-	const candidates = entries
-		.filter( ( e ) => e.isDirectory() )
-		.map( ( e ) => e.name )
-		.sort( ( a, b ) => b.length - a.length );
-	return candidates[0] ?? null;
+
+	const entriesAfter = await readdir( destDir, { withFileTypes: true } );
+	for ( const e of entriesAfter ) {
+		if ( e.isDirectory() && ! before.has( e.name ) ) {
+			return e.name;
+		}
+	}
+	return null;
+}
+
+/**
+ * If the extracted plugin contains a composer.json (typical for plugins built
+ * from GitHub source, like mcp-adapter), run `composer install --no-dev` so
+ * the plugin can find its `vendor/autoload.php`. Best-effort; skipped silently
+ * when composer is not on PATH.
+ */
+async function maybeRunComposerInstall( pluginDir ) {
+	const { existsSync } = await import( 'node:fs' );
+	if ( ! existsSync( join( pluginDir, 'composer.json' ) ) ) return { ran: false, reason: 'no-composer-json' };
+	if ( existsSync( join( pluginDir, 'vendor', 'autoload.php' ) ) ) {
+		return { ran: false, reason: 'autoload-already-present' };
+	}
+
+	const probe = await exec( 'composer', [ '--version' ], { shell: process.platform === 'win32' } );
+	if ( probe.code !== 0 ) {
+		logger.warn( `composer not available — skipping \`composer install\` in ${ pluginDir }. Run it manually if the plugin shows an autoloader warning.` );
+		return { ran: false, reason: 'composer-missing' };
+	}
+
+	logger.info( `Running \`composer install --no-dev\` in ${ pluginDir }` );
+	const r = await exec( 'composer', [ 'install', '--no-dev', '--no-interaction', '--optimize-autoloader' ], {
+		cwd: pluginDir,
+		shell: process.platform === 'win32',
+	} );
+	if ( r.code !== 0 ) {
+		logger.warn( `composer install failed in ${ pluginDir }: ${ r.stderr.trim() }` );
+		return { ran: true, ok: false, stderr: r.stderr };
+	}
+	logger.success( `composer install complete in ${ pluginDir }` );
+	return { ran: true, ok: true };
 }
 
 export const _internals = { buildZipUrl, buildManualSnippet, exec };
