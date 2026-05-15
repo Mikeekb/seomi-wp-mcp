@@ -319,7 +319,7 @@ export async function initCommand( opts ) {
 
 	// 1. Write .claude/.env
 	logger.step( 'Writing .claude/.env' );
-	const envRes = await mergeEnv( join( cwd, '.claude/.env' ), env );
+	const envRes = await mergeEnv( join( cwd, '.claude/.env' ), { ...env, WP_CLI_PHAR: wpCliPharPath } );
 	logger.success( `.claude/.env: created=${ envRes.created }, added=${ envRes.added.length }, updated=${ envRes.updated.length }, unchanged=${ envRes.unchanged.length }` );
 
 	// 2. Install WP plugin deps
@@ -328,6 +328,7 @@ export async function initCommand( opts ) {
 		logger.step( 'Installing WordPress plugin dependencies' );
 		depResults = await ensurePlugins( {
 			wpRoot,
+			wpCliPharPath,
 			ref: opts[ 'pin-deps' ],
 		} );
 		if ( depResults.manualSnippet ) {
@@ -357,7 +358,7 @@ export async function initCommand( opts ) {
 	if ( installDepsProd && prodSsh ) {
 		logger.step( 'Installing WP plugin dependencies on PROD (via SSH)' );
 		const sshSpec = composeSshSpec( prodSsh );
-		prodDepResults = await ensurePlugins( { sshSpec, ref: opts[ 'pin-deps' ] } );
+		prodDepResults = await ensurePlugins( { sshSpec, wpCliPharPath, ref: opts[ 'pin-deps' ] } );
 		if ( prodDepResults.manualSnippet ) {
 			logger.warn( 'Some prod dependencies could not be installed automatically.' );
 			logger.warn( 'Manual commands:\n' + prodDepResults.manualSnippet );

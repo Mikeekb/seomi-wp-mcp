@@ -46,8 +46,11 @@ async function readEnv( cwd ) {
 	return out;
 }
 
-async function wpPluginIsActive( wpRoot, slug ) {
-	const r = await exec( 'wp', [ 'plugin', 'is-active', slug, '--path=' + wpRoot ] );
+async function wpPluginIsActive( wpRoot, slug, wpCliPharPath ) {
+	const args = [ 'plugin', 'is-active', slug, '--path=' + wpRoot ];
+	const r = wpCliPharPath
+		? await exec( 'php', [ wpCliPharPath, ...args ] )
+		: await exec( 'wp', args, { shell: process.platform === 'win32' } );
 	return r.code === 0;
 }
 
@@ -134,7 +137,7 @@ export async function doctorCommand( opts ) {
 	let depsOk = true;
 	if ( wpRoot ) {
 		for ( const slug of [ 'abilities-api', 'mcp-adapter' ] ) {
-			const active = await wpPluginIsActive( wpRoot, slug );
+			const active = await wpPluginIsActive( wpRoot, slug, env?.WP_CLI_PHAR );
 			if ( active ) {
 				report.pass( `WP plugin active: ${ slug }` );
 			} else {
@@ -172,7 +175,11 @@ export async function doctorCommand( opts ) {
 	// 6. --fix path
 	if ( opts.fix && wpRoot && ! depsOk ) {
 		logger.step( 'Auto-fix: installing missing plugin deps' );
-		const r = await ensurePlugins( { wpRoot, ref: opts[ 'pin-deps' ] } );
+		const r = await ensurePlugins( {
+			wpRoot,
+			wpCliPharPath: env?.WP_CLI_PHAR,
+			ref: opts[ 'pin-deps' ],
+		} );
 		for ( const item of r.results ) {
 			process.stdout.write( `  ${ item.slug }: ${ item.action }\n` );
 		}

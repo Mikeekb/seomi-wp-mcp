@@ -60,22 +60,52 @@ function wpScopeFlags( { wpRoot, sshSpec } ) {
 	return [];
 }
 
+/**
+ * Run WP-CLI. Prefers `php <phar>` when a phar path is known — this avoids the
+ * Windows-specific issue where `spawn('wp', ...)` fails to find `wp.bat`/`wp.cmd`
+ * shims without `shell: true`. Falls back to the `wp` command (with shell on
+ * Windows) when no phar is provided.
+ *
+ * @param {Object}        scope
+ * @param {string}        [scope.wpCliPharPath]  Absolute path to wp-cli.phar (preferred).
+ * @param {string}        [scope.wpRoot]
+ * @param {string}        [scope.sshSpec]
+ * @param {string[]}      args                   WP-CLI args (without phar or scope flags).
+ */
+async function runWp( scope, args ) {
+	const fullArgs = [ ...args, ...wpScopeFlags( scope ) ];
+	if ( scope.wpCliPharPath ) {
+		return exec( 'php', [ scope.wpCliPharPath, ...fullArgs ] );
+	}
+	// Fallback: PATH lookup. On Windows wp resolves to wp.bat — needs shell.
+	return exec( 'wp', fullArgs, { shell: process.platform === 'win32' } );
+}
+
 async function wpCliAvailable( scope ) {
-	const r = await exec( 'wp', [ '--info', ...wpScopeFlags( scope ) ] );
-	logger.debug( `wp-plugin-installer: wp --info exit=${ r.code } at ${ scope.sshSpec || scope.wpRoot }` );
+	const r = await runWp( scope, [ '--info' ] );
+	logger.debug( `wp-plugin-installer: wp --info exit=${ r.code } at ${ scope.sshSpec || scope.wpRoot } via ${ scope.wpCliPharPath ? 'phar' : 'wp-shim' }` );
 	return r.code === 0;
 }
 
 async function wpCliIsActive( scope, slug ) {
-	const r = await exec( 'wp', [ 'plugin', 'is-active', slug, ...wpScopeFlags( scope ) ] );
+	const r = await runWp( scope, [ 'plugin', 'is-active', slug ] );
 	return r.code === 0;
 }
 
 async function wpCliInstall( scope, source ) {
 	logger.info( `wp-cli: installing ${ source }` );
-	const r = await exec( 'wp', [ 'plugin', 'install', source, '--activate', '--force', ...wpScopeFlags( scope ) ] );
+	const r = await runWp( scope, [ 'plugin', 'install', source, '--activate', '--force' ] );
 	if ( r.code !== 0 ) {
 		logger.debug( `wp-cli stderr: ${ r.stderr.trim() }` );
+	}
+	return r.code === 0;
+}
+
+async function wpCliActivate( scope, slug ) {
+	logger.info( `wp-cli: activating ${ slug }` );
+	const r = await runWp( scope, [ 'plugin', 'activate', slug ] );
+	if ( r.code !== 0 ) {
+		logger.debug( `wp-cli activate stderr: ${ r.stderr.trim() }` );
 	}
 	return r.code === 0;
 }
@@ -119,6 +149,10 @@ function buildManualSnippet( deps, wpRoot, sshSpec ) {
  *                                            wpRoot is ignored and the zip-download
  *                                            fallback is disabled (cannot drop files on
  *                                            a remote filesystem without extra protocol).
+ * @param {string} [cfg.wpCliPharPath]        Absolute path to wp-cli.phar. When set,
+ *                                            wp-cli is invoked as `php <phar>`. Strongly
+ *                                            recommended on Windows to avoid the wp.bat
+ *                                            shim issue with Node `spawn`.
  * @param {Array}  [cfg.deps=DEFAULT_DEPS]    Plugin specs.
  * @param {string} [cfg.ref]                  Override git ref for all deps (e.g. 'main' or a tag).
  * @returns {Promise<{ results: Array, manualSnippet: string|null }>}
@@ -126,7 +160,8 @@ function buildManualSnippet( deps, wpRoot, sshSpec ) {
 export async function ensurePlugins( cfg ) {
 	const wpRoot = cfg.wpRoot;
 	const sshSpec = cfg.sshSpec;
-	const scope = { wpRoot, sshSpec };
+	const wpCliPharPath = cfg.wpCliPharPath;
+	const scope = { wpRoot, sshSpec, wpCliPharPath };
 	const scopeLabel = sshSpec ? `ssh:${ sshSpec }` : wpRoot;
 	const deps = ( cfg.deps || DEFAULT_DEPS ).map( ( d ) => ( cfg.ref ? { ...d, ref: cfg.ref } : d ) );
 	const results = [];
@@ -188,7 +223,19 @@ export async function ensurePlugins( cfg ) {
 				}
 			}
 			await rm( tmpZip, { force: true } );
-			logger.success( `${ dep.slug } extracted to ${ targetDir } — activate from WP admin (no WP-CLI available)` );
+
+			// If WP-CLI is reachable, finish the job with `plugin activate`.
+			if ( useWpCli ) {
+				const activated = await wpCliActivate( scope, dep.slug );
+				if ( activated ) {
+					logger.success( `${ dep.slug } extracted + activated via WP-CLI` );
+					results.push( { slug: dep.slug, action: 'installed', strategy: 'zip+wp-cli-activate' } );
+					continue;
+				}
+				logger.warn( `${ dep.slug } extracted but WP-CLI activate failed — activate manually from WP admin` );
+			} else {
+				logger.success( `${ dep.slug } extracted to ${ targetDir } — activate from WP admin (no WP-CLI available)` );
+			}
 			results.push( { slug: dep.slug, action: 'extracted', strategy: 'zip-download', needsManualActivation: true } );
 		} catch ( err ) {
 			logger.error( `Failed to install ${ dep.slug }: ${ err.message }` );
