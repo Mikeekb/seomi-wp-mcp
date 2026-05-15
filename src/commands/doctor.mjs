@@ -68,14 +68,34 @@ async function wpFunctionExists( wpRoot, fn, wpCliPharPath ) {
 	return r.code === 0 && r.stdout.trim() === 'yes';
 }
 
+/**
+ * Lenient HTTP probe — diagnostic only (not used for real MCP traffic, which
+ * runs over stdio). Accepts self-signed TLS certs because local WP installs
+ * (`https://os-foo/`) almost always use them, and the probe is for "is the
+ * site reachable at all", not for trust verification.
+ */
 async function httpProbe( url, user, password ) {
+	const isHttps = url.startsWith( 'https://' );
+	let dispatcher;
+	if ( isHttps ) {
+		try {
+			const { Agent } = await import( 'undici' );
+			dispatcher = new Agent( { connect: { rejectUnauthorized: false } } );
+		} catch ( err ) {
+			// undici not available — proceed without dispatcher, may fail on self-signed.
+			logger.debug( `httpProbe: undici unavailable (${ err.message })` );
+		}
+	}
+
 	try {
 		const headers = {};
 		if ( user && password ) {
 			const auth = Buffer.from( `${ user }:${ password.replace( /\s+/g, '' ) }` ).toString( 'base64' );
 			headers.Authorization = `Basic ${ auth }`;
 		}
-		const resp = await fetch( url, { headers, redirect: 'manual' } );
+		const opts = { headers, redirect: 'manual' };
+		if ( dispatcher ) opts.dispatcher = dispatcher;
+		const resp = await fetch( url, opts );
 		return { ok: resp.ok, status: resp.status };
 	} catch ( err ) {
 		return { ok: false, status: 0, error: err.message };
