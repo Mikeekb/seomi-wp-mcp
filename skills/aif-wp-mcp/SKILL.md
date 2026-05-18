@@ -67,17 +67,17 @@ Common methods (full reference in `references/abilities.md`):
   `seomi/update-category`, `seomi/delete-category`, `seomi/get-tags` and tag CRUD,
   `seomi/search-terms`, `seomi/bulk-replace-in-term-descriptions`.
 - **Media:** `seomi/get-attachment`, `seomi/find-attachments-by-file`, `seomi/set-post-thumbnail`.
-- **WooCommerce (when active):** `seomi/wc/get-products`, `seomi/wc/get-product`,
-  `seomi/wc/create-product`, `seomi/wc/update-product`, `seomi/wc/delete-product`,
-  `seomi/wc/update-product-price`, `seomi/wc/update-product-stock`, product-category CRUD,
-  `seomi/wc/get-orders`, `seomi/wc/get-order`, `seomi/wc/update-order-status`.
+- **WooCommerce (when active):** `seomi-wc/get-products`, `seomi-wc/get-product`,
+  `seomi-wc/create-product`, `seomi-wc/update-product`, `seomi-wc/delete-product`,
+  `seomi-wc/update-product-price`, `seomi-wc/update-product-stock`, product-category CRUD,
+  `seomi-wc/get-orders`, `seomi-wc/get-order`, `seomi-wc/update-order-status`.
 
 ## Hard rules
 
 1. **Never** write term descriptions via `$wpdb->update( $wpdb->term_taxonomy, ... )` directly —
    Yoast `created_term` / `edited_term` actions don't fire and SEO indexes go stale.
 2. **Never** create/update WooCommerce products via `wp_insert_post` / `wp_update_post` — use
-   WC CRUD (`wc_get_product`, `$product->save()`). The `seomi/wc/*` abilities already do this
+   WC CRUD (`wc_get_product`, `$product->save()`). The `seomi-wc/*` abilities already do this
    correctly.
 3. If `mcp__<server-name>__mcp-adapter-discover-abilities` does not list the expected `seomi/*`
    methods, **stop** and run `seomi-wp-mcp doctor` before any further attempt — don't fall back

@@ -30,7 +30,7 @@ neither WP-CLI nor the plain REST API do.
 | `seomi/bulk-replace-in-term-descriptions`                       | Mass regex/string replace inside term descriptions (preserves tables)  |
 | `seomi/get-attachment`, `seomi/find-attachments-by-file`        | Media lookups                                                          |
 | `seomi/set-post-thumbnail`                                      | Set featured image                                                     |
-| `seomi/wc/*`                                                    | WooCommerce CRUD (products, categories, orders) — when WC active       |
+| `seomi-wc/*`                                                    | WooCommerce CRUD (products, categories, orders) — when WC active       |
 
 ## Lifecycle
 
@@ -50,7 +50,7 @@ edit it via `seomi-wp-mcp update`, not by hand.
 1. Never write term descriptions via `$wpdb->update( $wpdb->term_taxonomy, ... )` — Yoast
    actions won't fire.
 2. Never create/update WooCommerce products via `wp_insert_post` — use WC CRUD
-   (`wc_get_product`, `$product->save()`). The `seomi/wc/*` abilities already do this.
+   (`wc_get_product`, `$product->save()`). The `seomi-wc/*` abilities already do this.
 3. When extending the mu-plugin, route every term-description write through
    `Seomi\Mcp\Core::with_admin_term_kses()` (it detaches `wp_filter_kses` from
    `pre_term_description` while the callback runs, mimicking admin behaviour).

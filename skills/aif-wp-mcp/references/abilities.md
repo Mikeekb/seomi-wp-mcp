@@ -41,13 +41,13 @@ Generic: `seomi/search-terms` (substring in description, any taxonomy),
 
 ## WooCommerce (category: `woocommerce`, only when WC active)
 
-Products: `seomi/wc/get-products`, `seomi/wc/get-product`,
-`seomi/wc/create-product`, `seomi/wc/update-product`, `seomi/wc/delete-product`,
-`seomi/wc/update-product-price`, `seomi/wc/update-product-stock`.
+Products: `seomi-wc/get-products`, `seomi-wc/get-product`,
+`seomi-wc/create-product`, `seomi-wc/update-product`, `seomi-wc/delete-product`,
+`seomi-wc/update-product-price`, `seomi-wc/update-product-stock`.
 
-Product categories: `seomi/wc/get-product-categories` + create/update/delete-product-category.
+Product categories: `seomi-wc/get-product-categories` + create/update/delete-product-category.
 
-Orders: `seomi/wc/get-orders`, `seomi/wc/get-order`, `seomi/wc/update-order-status`.
+Orders: `seomi-wc/get-orders`, `seomi-wc/get-order`, `seomi-wc/update-order-status`.
 
 All product writes go through the WC CRUD API (`wc_get_product`, `$product->save()`) —
 **never** `wp_insert_post` for products, or WC lookup tables go out of sync.
