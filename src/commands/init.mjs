@@ -91,28 +91,40 @@ function detectWpRoot( cwd ) {
 }
 
 async function askCredentials() {
-	logger.step( 'WordPress credentials — LOCAL' );
-	const WP_LOCAL_URL = await input( {
-		message: 'Local WP site URL:',
-		default: 'https://localhost',
-		validate: ( v ) => /^https?:\/\//.test( v ) || 'Must start with http:// or https://',
-	} );
-	const WP_LOCAL_USER = await input( {
-		message: 'WP admin username (for app password):',
-		default: 'ai-agent',
-	} );
-	const WP_LOCAL_APP_PASSWORD = await password( {
-		message: 'Application password (paste as shown in WP admin):',
-		mask: '*',
-	} );
-	const WP_LOCAL_MCP_SERVER = await input( {
-		message: 'MCP server name (in Claude config):',
-		default: 'wordpress-local',
+	// First: does the user even have a local WP install?
+	// Common case where they don't: theme/plugin lives locally as a git repo,
+	// but the full WordPress instance only runs on a remote server.
+	const wantLocal = await confirm( {
+		message: 'Configure a LOCAL WordPress integration (you have wp-content/ locally and want to talk to it)?',
+		default: true,
 	} );
 
+	let WP_LOCAL_URL, WP_LOCAL_USER, WP_LOCAL_APP_PASSWORD, WP_LOCAL_MCP_SERVER;
+	if ( wantLocal ) {
+		logger.step( 'WordPress credentials — LOCAL' );
+		WP_LOCAL_URL = await input( {
+			message: 'Local WP site URL:',
+			default: 'https://localhost',
+			validate: ( v ) => /^https?:\/\//.test( v ) || 'Must start with http:// or https://',
+		} );
+		WP_LOCAL_USER = await input( {
+			message: 'WP admin username (for app password):',
+			default: 'ai-agent',
+		} );
+		WP_LOCAL_APP_PASSWORD = await password( {
+			message: 'Application password (paste as shown in WP admin):',
+			mask: '*',
+		} );
+		WP_LOCAL_MCP_SERVER = await input( {
+			message: 'MCP server name (in .mcp.json):',
+			default: 'wordpress-local',
+		} );
+	}
+
+	// If no local — prod is the only useful target, default to yes; otherwise default no.
 	const wantProd = await confirm( {
 		message: 'Configure PRODUCTION too?',
-		default: false,
+		default: ! wantLocal,
 	} );
 
 	let prod = {};
@@ -167,16 +179,19 @@ async function askCredentials() {
 		}
 	}
 
-	return {
-		env: {
-			WP_LOCAL_URL,
-			WP_LOCAL_USER,
-			WP_LOCAL_APP_PASSWORD,
-			WP_LOCAL_MCP_SERVER,
-			...prod,
-		},
-		prodSsh,
-	};
+	if ( ! wantLocal && ! wantProd ) {
+		throw new Error( 'Nothing to configure — answered no to both local and production. Re-run `seomi-wp-mcp init` and pick at least one target.' );
+	}
+
+	const env = { ...prod };
+	if ( wantLocal ) {
+		env.WP_LOCAL_URL = WP_LOCAL_URL;
+		env.WP_LOCAL_USER = WP_LOCAL_USER;
+		env.WP_LOCAL_APP_PASSWORD = WP_LOCAL_APP_PASSWORD;
+		env.WP_LOCAL_MCP_SERVER = WP_LOCAL_MCP_SERVER;
+	}
+
+	return { env, wantLocal, prodSsh };
 }
 
 async function connectMuPlugin( cwd, mode ) {
@@ -263,42 +278,59 @@ export async function initCommand( opts ) {
 	const cwd = process.cwd();
 	logger.step( `seomi-wp-mcp init — cwd: ${ cwd }` );
 
-	const wpRoot = detectWpRoot( cwd );
-	if ( ! wpRoot ) {
-		logger.error( 'This does not look like a WordPress project root (no wp-content/ or wp-config.php found here or one level up).' );
-		return 1;
-	}
-	logger.info( `Detected WP root: ${ wpRoot }` );
+	const { env, wantLocal, prodSsh } = await askCredentials();
 
-	const { env, prodSsh } = await askCredentials();
-
-	// WP-CLI phar path — required for the local stdio MCP server config.
-	const detectedPhar = await detectWpCliPhar();
-	if ( detectedPhar ) {
-		logger.info( `Detected WP-CLI phar at ${ detectedPhar }` );
+	// WP root only matters if we have a local install. For prod-only setups
+	// the cwd is used as the project root (typically a theme/plugin repo).
+	let wpRoot = null;
+	if ( wantLocal ) {
+		wpRoot = detectWpRoot( cwd );
+		if ( ! wpRoot ) {
+			logger.error( 'You chose to configure a LOCAL integration, but no wp-content/ or wp-config.php was found here or one level up. Re-run init and pick "no" for local, or run it from your WP root.' );
+			return 1;
+		}
+		logger.info( `Detected WP root: ${ wpRoot }` );
 	} else {
-		logger.warn( 'Could not auto-detect WP-CLI phar path.' );
+		logger.info( `No local WordPress — using cwd as project root: ${ cwd }` );
 	}
-	const wpCliPharPath = await input( {
-		message: 'Absolute path to wp-cli.phar (used by the stdio MCP server):',
-		default: detectedPhar || ( process.platform === 'win32' ? 'C:/wp-cli/wp-cli.phar' : '/usr/local/bin/wp-cli.phar' ),
-		validate: ( v ) => existsSync( v ) || `Not found: ${ v }`,
-	} );
 
-	const muMode = await select( {
-		message: 'How should the mu-plugin be connected?',
-		default: 'submodule',
-		choices: [
-			{ name: 'git submodule (recommended)', value: 'submodule' },
-			{ name: 'composer require',            value: 'composer' },
-			{ name: 'plain clone (no auto-updates)', value: 'copy' },
-		],
-	} );
+	// WP-CLI phar path — needed for both LOCAL stdio MCP and PROD --ssh stdio MCP.
+	// Skip the prompt entirely if neither target is configured (impossible — we
+	// would have thrown in askCredentials, but defensive).
+	let wpCliPharPath = null;
+	if ( wantLocal || prodSsh ) {
+		const detectedPhar = await detectWpCliPhar();
+		if ( detectedPhar ) {
+			logger.info( `Detected WP-CLI phar at ${ detectedPhar }` );
+		} else {
+			logger.warn( 'Could not auto-detect WP-CLI phar path.' );
+		}
+		wpCliPharPath = await input( {
+			message: 'Absolute path to wp-cli.phar (used by the stdio MCP server):',
+			default: detectedPhar || ( process.platform === 'win32' ? 'C:/wp-cli/wp-cli.phar' : '/usr/local/bin/wp-cli.phar' ),
+			validate: ( v ) => existsSync( v ) || `Not found: ${ v }`,
+		} );
+	}
 
-	const installDeps = await confirm( {
-		message: 'Auto-install WordPress plugin dependencies on LOCAL (Abilities API + MCP Adapter)?',
-		default: true,
-	} );
+	const muMode = wantLocal
+		? await select( {
+			message: 'How should the mu-plugin be connected locally?',
+			default: 'submodule',
+			choices: [
+				{ name: 'git submodule (recommended)', value: 'submodule' },
+				{ name: 'composer require',            value: 'composer' },
+				{ name: 'plain clone (no auto-updates)', value: 'copy' },
+				{ name: "skip — I'll install it on the target WP myself", value: 'skip' },
+			],
+		} )
+		: 'skip';
+
+	const installDeps = wantLocal
+		? await confirm( {
+			message: 'Auto-install WordPress plugin dependencies on LOCAL (Abilities API + MCP Adapter)?',
+			default: true,
+		} )
+		: false;
 
 	const installDepsProd = prodSsh
 		? await confirm( {
@@ -319,7 +351,9 @@ export async function initCommand( opts ) {
 
 	// 1. Write .claude/.env
 	logger.step( 'Writing .claude/.env' );
-	const envRes = await mergeEnv( join( cwd, '.claude/.env' ), { ...env, WP_CLI_PHAR: wpCliPharPath } );
+	const envPayload = { ...env };
+	if ( wpCliPharPath ) envPayload.WP_CLI_PHAR = wpCliPharPath;
+	const envRes = await mergeEnv( join( cwd, '.claude/.env' ), envPayload );
 	logger.success( `.claude/.env: created=${ envRes.created }, added=${ envRes.added.length }, updated=${ envRes.updated.length }, unchanged=${ envRes.unchanged.length }` );
 
 	// 2. Install WP plugin deps
@@ -337,9 +371,15 @@ export async function initCommand( opts ) {
 		}
 	}
 
-	// 3. Connect mu-plugin
-	logger.step( `Connecting mu-plugin via ${ muMode }` );
-	const muRes = await connectMuPlugin( cwd, muMode );
+	// 3. Connect mu-plugin (skipped when no local WP)
+	let muRes;
+	if ( muMode === 'skip' ) {
+		muRes = { strategy: 'skip', action: 'skipped' };
+		logger.info( 'mu-plugin connection skipped — install it on your WordPress target yourself.' );
+	} else {
+		logger.step( `Connecting mu-plugin via ${ muMode }` );
+		muRes = await connectMuPlugin( cwd, muMode );
+	}
 
 	// 4. Drop aif skill
 	let skillRes = null;
@@ -369,12 +409,16 @@ export async function initCommand( opts ) {
 	//    LOCAL  = stdio + WP-CLI mcp-adapter serve --path=<wpRoot>
 	//    PROD   = stdio + WP-CLI mcp-adapter serve --ssh=<spec>
 	logger.step( 'Writing project-scope .mcp.json' );
-	const localCfg = buildStdioLocalConfig( {
-		wpCliPharPath,
-		wpRoot,
-		user: env.WP_LOCAL_USER,
-	} );
-	const localRes = await claudeAddServerEntry( cwd, env.WP_LOCAL_MCP_SERVER, localCfg );
+
+	let localRes = null;
+	if ( wantLocal ) {
+		const localCfg = buildStdioLocalConfig( {
+			wpCliPharPath,
+			wpRoot,
+			user: env.WP_LOCAL_USER,
+		} );
+		localRes = await claudeAddServerEntry( cwd, env.WP_LOCAL_MCP_SERVER, localCfg );
+	}
 
 	let prodRes = null;
 	if ( prodSsh && env.WP_PROD_MCP_SERVER ) {
@@ -398,7 +442,7 @@ export async function initCommand( opts ) {
 		`  WP plugin deps (prod)    — ${ prodDepResults ? prodDepResults.results.map( r => r.slug + ':' + r.action ).join( ', ' ) : 'skipped' }`,
 		`  aif-wp-mcp skill         — ${ skillRes ? 'installed' : 'skipped' }`,
 		`  CLAUDE.md block          — ${ claudeMdRes ? claudeMdRes.action : 'skipped' }`,
-		`  .mcp.json (local server) — ${ localRes.action } (${ env.WP_LOCAL_MCP_SERVER })`,
+		`  .mcp.json (local server) — ${ localRes ? localRes.action + ' (' + env.WP_LOCAL_MCP_SERVER + ')' : 'skipped (no local)' }`,
 		`  .mcp.json (prod server)  — ${ prodRes ? prodRes.action + ' (' + env.WP_PROD_MCP_SERVER + ')' : 'skipped' }`,
 	];
 	process.stdout.write( '\n' + summary.join( '\n' ) + '\n\n' );
@@ -415,6 +459,12 @@ export async function initCommand( opts ) {
 		'     (this CLI only manages the block inside CLAUDE.md; docs/ is owned by /aif-docs).',
 		'  4. Run `seomi-wp-mcp doctor` to verify everything is wired up correctly.',
 	];
+	if ( muMode === 'skip' ) {
+		hints.push( '  5. Install the seomi-mcp-abilities mu-plugin on your WordPress target' );
+		hints.push( '     (e.g. as part of your deploy) — clone or composer require it into' );
+		hints.push( '     wp-content/mu-plugins/seomi-mcp-abilities/ and add the loader shim' );
+		hints.push( '     at wp-content/mu-plugins/mcp-abilities.php.' );
+	}
 	if ( depResults?.manualSnippet ) {
 		hints.push( '  5. Finish manual local plugin install (see commands printed above).' );
 	}
