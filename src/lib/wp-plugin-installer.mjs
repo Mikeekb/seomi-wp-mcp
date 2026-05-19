@@ -103,11 +103,13 @@ async function runWp( scope, args ) {
 	if ( interactive ) {
 		logger.debug( `runWp: sshSpec=${ scope.sshSpec } → interactive` );
 	}
+	// Calls route through `_internals.exec` so tests can stub the spawn
+	// boundary at a single seam.
 	if ( scope.wpCliPharPath ) {
-		return exec( 'php', [ scope.wpCliPharPath, ...fullArgs ], { interactive } );
+		return _internals.exec( 'php', [ scope.wpCliPharPath, ...fullArgs ], { interactive } );
 	}
 	// Fallback: PATH lookup. On Windows wp resolves to wp.bat — needs shell.
-	return exec( 'wp', fullArgs, { shell: process.platform === 'win32', interactive } );
+	return _internals.exec( 'wp', fullArgs, { shell: process.platform === 'win32', interactive } );
 }
 
 async function wpCliAvailable( scope ) {
@@ -392,4 +394,4 @@ async function maybeRunComposerInstall( pluginDir ) {
 	return { ran: true, ok: true };
 }
 
-export const _internals = { buildZipUrl, buildManualSnippet, exec };
+export const _internals = { buildZipUrl, buildManualSnippet, exec, runWp };
