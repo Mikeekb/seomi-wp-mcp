@@ -66,6 +66,16 @@ seomi-wp-mcp init
 
 Если отказаться от визарда — wp-cli через SSH всё ещё работает, просто спросит пароль интерактивно на каждом вызове. (До 0.1.11 на Windows процесс **зависал** без видимого промпта — это пофикшено: для wp-cli с `--ssh=` теперь используется `stdio: ['inherit','pipe','inherit']`, и терминал пользователя сам обрабатывает пароль.)
 
+### Авто-установка mu-плагина на прод (0.1.12+)
+
+Если SSH к проду настроен **и** ты согласился ставить плагины-зависимости на прод (`installDepsProd`), `init` теперь автоматически ставит на прод и mu-плагин `seomi-mcp-abilities` — отдельного вопроса не задаётся. Используется тот же SSH-транспорт что и для `wp plugin install --ssh=`:
+
+1. Probe: `ssh ... 'test -d <wpRoot>/wp-content/mu-plugins/seomi-mcp-abilities'` — уже стоит? пропуск.
+2. Clone: `ssh ... 'mkdir -p ... && git clone --depth=1 <repo> ... && rm -rf .git'`.
+3. Loader: `ssh ... 'cat > <wpRoot>/wp-content/mu-plugins/mcp-abilities.php'` — PHP-шим из 4 строк пишется через stdin.
+
+Если какой-то шаг падает — `init` печатает готовый сниппет с точными remote-командами и телом PHP-loader'а, и установку можно завершить руками. **Требование:** на проде должен быть установлен `git` (`apt install git` / `yum install git`). До 0.1.12 на prod-only setup-ах mu-плагин приходилось ставить вручную после `init`.
+
 ## Использование вместе с `ai-factory`
 
 CLI задуман как соседствующий с [ai-factory](https://github.com/lee-to/ai-factory). Два эквивалентных пути:
@@ -141,7 +151,8 @@ node bin/seomi-wp-mcp.mjs --help
 bin/                    Точка входа
 src/
   commands/             init, update, doctor
-  lib/                  logger, markers, env-writer, claude-mcp, wp-plugin-installer
+  lib/                  logger, markers, env-writer, claude-mcp, wp-plugin-installer,
+                        ssh-key-setup, ssh-mu-plugin-installer
 skills/
   aif-wp-mcp/           Скилл в стандартном пути (совместим с npx skills);
                         копируется в .claude/skills/ из этого источника на init

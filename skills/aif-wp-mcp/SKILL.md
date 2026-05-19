@@ -58,6 +58,12 @@ through a control panel (Beget-style), the wizard degrades gracefully — it pri
 content and a how-to instead of failing silently. If the user declines or the wizard can't
 add the key, wp-cli over SSH still works but will prompt for the password on each call.
 
+Since **0.1.12**, when `prodSsh` is configured and the user opts into the prod plugin install,
+`init` also installs the `seomi-mcp-abilities` **mu-plugin** on the prod host automatically
+through the same SSH transport (`probe → git clone → loader-write via stdin`). Before 0.1.12
+prod-only setups had to install the mu-plugin by hand after `init`; now both `mcp-adapter` and
+the mu-plugin land on prod in the same step. Requires `git` on the remote host.
+
 ## Contract: abilities to prefer for content work
 
 **Always prefer these abilities over `wp-cli`, the plain WP REST API, or `$wpdb` writes

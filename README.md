@@ -66,6 +66,16 @@ When you configure a production target, `init` offers an opt-in **SSH key wizard
 
 If you decline the wizard, wp-cli over SSH still works — it just prompts for the password interactively on every call. (Pre-0.1.11 it used to *hang* on Windows without a visible prompt; that is now fixed: SSH-scoped wp-cli runs in `stdio: ['inherit','pipe','inherit']` so the user's terminal handles the password.)
 
+### Production mu-plugin auto-install (0.1.12+)
+
+When SSH to prod is configured **and** you opt into the prod plugin install (`installDepsProd`), `init` now also installs the `seomi-mcp-abilities` mu-plugin on the prod host automatically — no separate prompt. It uses the same SSH transport as `wp plugin install --ssh=`:
+
+1. Probe: `ssh ... 'test -d <wpRoot>/wp-content/mu-plugins/seomi-mcp-abilities'` — already present? short-circuit.
+2. Clone: `ssh ... 'mkdir -p ... && git clone --depth=1 <repo> ... && rm -rf .git'`.
+3. Loader: `ssh ... 'cat > <wpRoot>/wp-content/mu-plugins/mcp-abilities.php'` with the 4-line PHP shim piped through stdin.
+
+If any step fails, `init` falls back to printing a copy-paste snippet with the exact remote commands and the PHP loader body. **Requirement:** `git` must be installed on the prod host (`apt install git` / `yum install git`). Before 0.1.12, prod-only setups had to install the mu-plugin manually after running `init`.
+
 ## Using with `ai-factory`
 
 This CLI is designed to live alongside [ai-factory](https://github.com/lee-to/ai-factory). Two equivalent paths:
@@ -143,7 +153,8 @@ Layout:
 bin/                    Entry point
 src/
   commands/             init, update, doctor
-  lib/                  logger, markers, env-writer, claude-mcp, wp-plugin-installer
+  lib/                  logger, markers, env-writer, claude-mcp, wp-plugin-installer,
+                        ssh-key-setup, ssh-mu-plugin-installer
 skills/
   aif-wp-mcp/           Standard-path skill (npx skills compatible);
                         also copied into .claude/skills/ on init by our CLI
