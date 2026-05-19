@@ -39,5 +39,14 @@
     "seomi",
     "abilities-api",
     "woocommerce"
-  ]
+  ],
+  "main": "index.js",
+  "directories": {
+    "test": "test"
+  },
+  "devDependencies": {},
+  "author": "",
+  "bugs": {
+    "url": "https://github.com/Mikeekb/seomi-wp-mcp/issues"
+  }
 }
