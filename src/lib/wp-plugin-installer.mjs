@@ -38,9 +38,30 @@ export const DEFAULT_DEPS = [
 	},
 ];
 
+/**
+ * Spawn a child process and resolve with { code, stdout, stderr }.
+ *
+ * `opts.interactive` (custom, not a spawn option) controls stdio:
+ *   - `false` / unset (default): all three streams are piped — stdout/stderr
+ *     are buffered and returned, stdin is closed. Used for everything except
+ *     SSH-backed wp-cli calls.
+ *   - `true`: `stdio: ['inherit', 'pipe', 'inherit']`. Stdin is the user's
+ *     terminal (so `ssh` can read a password from /dev/tty / CONIN$), stderr
+ *     is the user's terminal (so the user sees auth errors and ssh hints
+ *     instead of having them silently swallowed), but stdout is still piped
+ *     so callers like `detectWpVersion`/`wpCliIsActive` can parse the output.
+ *
+ * The `interactive` flag is stripped from opts before being passed to spawn —
+ * spawn would otherwise warn about an unknown option.
+ */
 function exec( cmd, args, opts = {} ) {
+	const { interactive, ...spawnOpts } = opts;
+	if ( interactive ) {
+		spawnOpts.stdio = [ 'inherit', 'pipe', 'inherit' ];
+		logger.debug( `exec: interactive stdio for ${ cmd }` );
+	}
 	return new Promise( ( resolve ) => {
-		const child = spawn( cmd, args, { shell: false, windowsHide: true, ...opts } );
+		const child = spawn( cmd, args, { shell: false, windowsHide: true, ...spawnOpts } );
 		let stdout = '';
 		let stderr = '';
 		child.stdout?.on( 'data', ( d ) => { stdout += d.toString(); } );
@@ -74,11 +95,19 @@ function wpScopeFlags( { wpRoot, sshSpec } ) {
  */
 async function runWp( scope, args ) {
 	const fullArgs = [ ...args, ...wpScopeFlags( scope ) ];
+	// Any wp-cli call with --ssh=<spec> shells out to `ssh` under the hood,
+	// which reads passwords from a TTY only. Piped stdin hangs forever on
+	// Windows OpenSSH (no visible prompt), so SSH-scoped invocations must
+	// run in interactive stdio mode.
+	const interactive = !! scope.sshSpec;
+	if ( interactive ) {
+		logger.debug( `runWp: sshSpec=${ scope.sshSpec } → interactive` );
+	}
 	if ( scope.wpCliPharPath ) {
-		return exec( 'php', [ scope.wpCliPharPath, ...fullArgs ] );
+		return exec( 'php', [ scope.wpCliPharPath, ...fullArgs ], { interactive } );
 	}
 	// Fallback: PATH lookup. On Windows wp resolves to wp.bat — needs shell.
-	return exec( 'wp', fullArgs, { shell: process.platform === 'win32' } );
+	return exec( 'wp', fullArgs, { shell: process.platform === 'win32', interactive } );
 }
 
 async function wpCliAvailable( scope ) {
