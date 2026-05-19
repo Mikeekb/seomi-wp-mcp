@@ -55,6 +55,17 @@ That's ~30 minutes of error-prone manual work, repeated for every WP project. `s
 - **WP-CLI** (recommended) for the auto-install fallback chain.
 - **Claude Code CLI** for `claude mcp add` registration (without it, the CLI just prints copy-paste commands instead of running them).
 
+## SSH access to production
+
+When you configure a production target, `init` offers an opt-in **SSH key wizard** before running any wp-cli over SSH. The flow is:
+
+1. Generate an `ed25519` key (or reuse the one at `~/.ssh/id_ed25519`).
+2. Copy the public key to the prod host via `ssh-copy-id` — you'll be asked for the SSH password **exactly once**. On systems without `ssh-copy-id` (typical for Windows OpenSSH), the wizard falls back to a portable `ssh ... cat >> authorized_keys` pipe.
+3. Verify with `ssh -o BatchMode=yes ... 'echo ok'`. If verify passes, every subsequent wp-cli `--ssh=` call (now and on future re-runs) is passwordless.
+4. If verify fails — common on managed hosts like Beget where `authorized_keys` is only writable through the control panel — the wizard prints the public key and a how-to, and asks whether to still attempt the prod plugin install.
+
+If you decline the wizard, wp-cli over SSH still works — it just prompts for the password interactively on every call. (Pre-0.1.11 it used to *hang* on Windows without a visible prompt; that is now fixed: SSH-scoped wp-cli runs in `stdio: ['inherit','pipe','inherit']` so the user's terminal handles the password.)
+
 ## Using with `ai-factory`
 
 This CLI is designed to live alongside [ai-factory](https://github.com/lee-to/ai-factory). Two equivalent paths:

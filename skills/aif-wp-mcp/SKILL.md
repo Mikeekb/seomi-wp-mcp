@@ -49,6 +49,15 @@ Treat any of these as a signal to activate this skill:
 If the package is installed globally (`npm i -g @seomi/wp-mcp`), use `seomi-wp-mcp` directly
 without `npx`.
 
+### Production access notes
+
+`init` will offer an optional **SSH key wizard** before any wp-cli-over-SSH calls when the
+user configures a prod target. It asks for the SSH password once (during `ssh-copy-id`),
+then every subsequent prod operation is passwordless. On managed hosts that only accept keys
+through a control panel (Beget-style), the wizard degrades gracefully — it prints the .pub
+content and a how-to instead of failing silently. If the user declines or the wizard can't
+add the key, wp-cli over SSH still works but will prompt for the password on each call.
+
 ## Contract: abilities to prefer for content work
 
 **Always prefer these abilities over `wp-cli`, the plain WP REST API, or `$wpdb` writes
