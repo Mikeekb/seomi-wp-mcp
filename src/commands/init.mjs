@@ -31,10 +31,18 @@ import {
 } from '../lib/claude-mcp.mjs';
 import { ensurePlugins } from '../lib/wp-plugin-installer.mjs';
 import { ensureSshKey } from '../lib/ssh-key-setup.mjs';
+import { ensureMuPluginOnSsh } from '../lib/ssh-mu-plugin-installer.mjs';
 
 const MU_PLUGIN_REPO_URL = 'https://github.com/Mikeekb/wp-mcp-abilities.git';
-const MU_PLUGIN_DIR = 'wp-content/mu-plugins/seomi-mcp-abilities';
+const MU_PLUGIN_SLUG = 'seomi-mcp-abilities';
+const MU_PLUGIN_DIR = `wp-content/mu-plugins/${ MU_PLUGIN_SLUG }`;
 const MU_LOADER_FILE = 'wp-content/mu-plugins/mcp-abilities.php';
+const MU_PLUGIN_LOADER_PHP = `<?php
+defined( 'ABSPATH' ) || exit;
+if ( defined( 'SEOMI_MCP_VERSION' ) ) return;
+$f = __DIR__ . '/${ MU_PLUGIN_SLUG }/${ MU_PLUGIN_SLUG }.php';
+if ( is_readable( $f ) ) require_once $f;
+`;
 
 function pkgRoot() {
 	return resolvePath( new URL( '../..', import.meta.url ).pathname.replace( /^\/([A-Z]:)/, '$1' ) );
@@ -201,13 +209,7 @@ async function connectMuPlugin( cwd, mode ) {
 
 	if ( ! existsSync( loaderPath ) ) {
 		await mkdir( join( cwd, 'wp-content/mu-plugins' ), { recursive: true } );
-		const loader = `<?php
-defined( 'ABSPATH' ) || exit;
-if ( defined( 'SEOMI_MCP_VERSION' ) ) return;
-$f = __DIR__ . '/seomi-mcp-abilities/seomi-mcp-abilities.php';
-if ( is_readable( $f ) ) require_once $f;
-`;
-		await writeFile( loaderPath, loader, 'utf8' );
+		await writeFile( loaderPath, MU_PLUGIN_LOADER_PHP, 'utf8' );
 		logger.success( `Created loader at ${ MU_LOADER_FILE }` );
 	} else {
 		logger.info( `Loader already present at ${ MU_LOADER_FILE }` );
@@ -436,6 +438,7 @@ export async function initCommand( opts ) {
 
 	// 6. Install plugin deps on PROD via WP-CLI --ssh (if asked).
 	let prodDepResults = null;
+	let prodMuRes = null;
 	if ( installDepsProd && prodSsh ) {
 		logger.step( 'Installing WP plugin dependencies on PROD (via SSH)' );
 		const sshSpec = composeSshSpec( prodSsh );
@@ -443,6 +446,28 @@ export async function initCommand( opts ) {
 		if ( prodDepResults.manualSnippet ) {
 			logger.warn( 'Some prod dependencies could not be installed automatically.' );
 			logger.warn( 'Manual commands:\n' + prodDepResults.manualSnippet );
+		}
+
+		// 6b. Auto-install the seomi-mcp-abilities mu-plugin on PROD via SSH.
+		//     Same transport as the plugin install above — runs unconditionally
+		//     when prod SSH is configured AND the user opted into prod plugin
+		//     install. No new confirm prompt; this is the prod equivalent of
+		//     the local mu-plugin "git clone" strategy.
+		logger.step( 'Installing seomi-mcp-abilities mu-plugin on PROD (via SSH)' );
+		prodMuRes = await ensureMuPluginOnSsh( {
+			sshHost: prodSsh.sshHost,
+			sshUser: prodSsh.sshUser,
+			sshPort: prodSsh.sshPort,
+			wpRoot: prodSsh.wpRoot,
+			repoUrl: MU_PLUGIN_REPO_URL,
+			slug: MU_PLUGIN_SLUG,
+			loaderContent: MU_PLUGIN_LOADER_PHP,
+		} );
+		if ( prodMuRes.action === 'already-present' ) {
+			logger.success( 'mu-plugin already present on prod — skipped' );
+		}
+		if ( prodMuRes.manualSnippet ) {
+			logger.warn( 'mu-plugin install on prod incomplete:\n' + prodMuRes.manualSnippet );
 		}
 	}
 
@@ -484,6 +509,7 @@ export async function initCommand( opts ) {
 		`  mu-plugin (${ muMode })${ ' '.repeat( Math.max( 0, 12 - muMode.length ) ) }— ${ muRes.action }`,
 		`  WP plugin deps (local)   — ${ depResults ? depResults.results.map( r => r.slug + ':' + r.action ).join( ', ' ) : 'skipped' }`,
 		`  WP plugin deps (prod)    — ${ prodDepResults ? prodDepResults.results.map( r => r.slug + ':' + r.action ).join( ', ' ) : 'skipped' }`,
+		`  mu-plugin (prod)         — ${ prodMuRes ? prodMuRes.action : 'skipped' }`,
 		sshKeyLine,
 		`  aif-wp-mcp skill         — ${ skillRes ? 'installed' : 'skipped' }`,
 		`  CLAUDE.md block          — ${ claudeMdRes ? claudeMdRes.action : 'skipped' }`,
