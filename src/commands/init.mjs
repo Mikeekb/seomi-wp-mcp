@@ -30,6 +30,7 @@ import {
 	composeSshSpec,
 } from '../lib/claude-mcp.mjs';
 import { ensurePlugins } from '../lib/wp-plugin-installer.mjs';
+import { ensureSshKey } from '../lib/ssh-key-setup.mjs';
 
 const MU_PLUGIN_REPO_URL = 'https://github.com/Mikeekb/wp-mcp-abilities.git';
 const MU_PLUGIN_DIR = 'wp-content/mu-plugins/seomi-mcp-abilities';
@@ -280,6 +281,46 @@ export async function initCommand( opts ) {
 
 	const { env, wantLocal, prodSsh } = await askCredentials();
 
+	// Optional SSH key wizard — set up passwordless auth to prod now so that
+	// subsequent steps (and future re-runs) don't hang waiting for a TTY
+	// password prompt. Asked for ONCE here; if user opts in and verify
+	// fails, they can choose to bail on the prod plugin install to avoid
+	// re-hitting the same blocker.
+	let sshKeyRes = null;
+	let skipProdInstall = false;
+	if ( prodSsh ) {
+		const wantKey = await confirm( {
+			message: 'Set up SSH key-based auth to prod now? (recommended; you will be asked for the SSH password ONCE)',
+			default: true,
+		} );
+		if ( wantKey ) {
+			logger.step( 'SSH key setup to production' );
+			try {
+				sshKeyRes = await ensureSshKey( {
+					sshHost: prodSsh.sshHost,
+					sshUser: prodSsh.sshUser,
+					sshPort: prodSsh.sshPort,
+					comment: `ai-agent@${ prodSsh.sshHost }`,
+				} );
+				if ( ! sshKeyRes.verified ) {
+					logger.warn( sshKeyRes.manualHint );
+					const cont = await confirm( {
+						message: 'Continue with plugin install on PROD anyway? (you may be prompted for SSH password during install)',
+						default: false,
+					} );
+					skipProdInstall = ! cont;
+				}
+			} catch ( err ) {
+				logger.error( `SSH key wizard failed: ${ err.message }` );
+				const cont = await confirm( {
+					message: 'Continue with plugin install on PROD anyway?',
+					default: false,
+				} );
+				skipProdInstall = ! cont;
+			}
+		}
+	}
+
 	// WP root only matters if we have a local install. For prod-only setups
 	// the cwd is used as the project root (typically a theme/plugin repo).
 	let wpRoot = null;
@@ -332,7 +373,7 @@ export async function initCommand( opts ) {
 		} )
 		: false;
 
-	const installDepsProd = prodSsh
+	const installDepsProd = prodSsh && ! skipProdInstall
 		? await confirm( {
 			message: 'Also auto-install plugin dependencies on PROD (via WP-CLI --ssh)?',
 			default: true,
@@ -435,11 +476,15 @@ export async function initCommand( opts ) {
 
 	// 8. Summary
 	logger.step( 'Summary' );
+	const sshKeyLine = sshKeyRes
+		? `  SSH key (prod)           — ${ sshKeyRes.keygenAction }, copy=${ sshKeyRes.copyAction }${ sshKeyRes.verified ? ', verified' : ', NOT verified — see manual hint above' }`
+		: '  SSH key (prod)           — skipped';
 	const summary = [
 		`  .claude/.env             — ${ envRes.created ? 'created' : 'updated' } (+${ envRes.added.length } / ~${ envRes.updated.length })`,
 		`  mu-plugin (${ muMode })${ ' '.repeat( Math.max( 0, 12 - muMode.length ) ) }— ${ muRes.action }`,
 		`  WP plugin deps (local)   — ${ depResults ? depResults.results.map( r => r.slug + ':' + r.action ).join( ', ' ) : 'skipped' }`,
 		`  WP plugin deps (prod)    — ${ prodDepResults ? prodDepResults.results.map( r => r.slug + ':' + r.action ).join( ', ' ) : 'skipped' }`,
+		sshKeyLine,
 		`  aif-wp-mcp skill         — ${ skillRes ? 'installed' : 'skipped' }`,
 		`  CLAUDE.md block          — ${ claudeMdRes ? claudeMdRes.action : 'skipped' }`,
 		`  .mcp.json (local server) — ${ localRes ? localRes.action + ' (' + env.WP_LOCAL_MCP_SERVER + ')' : 'skipped (no local)' }`,
