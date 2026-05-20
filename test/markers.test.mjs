@@ -79,3 +79,70 @@ test( 'hasBlock returns correct boolean', async () => {
 	assert.equal( await hasBlock( path ), true );
 	await rm( dir, { recursive: true, force: true } );
 } );
+
+test( 'insertOrUpdate stays single-block when content itself mentions markers', async () => {
+	// Regression: older non-greedy regex matched only up to the FIRST inline
+	// `:end` mention inside the block body, leaving the real end as orphan
+	// content and accumulating duplicates on every re-run.
+	const dir = await tmp();
+	const path = join( dir, 'CLAUDE.md' );
+	const content = [
+		'Managed body that mentions the markers in prose:',
+		'`<!-- seomi-wp-mcp:start -->` and `<!-- seomi-wp-mcp:end -->` — CLI-managed.',
+		'Trailing sentence after the inline mentions.',
+	].join( '\n' );
+
+	for ( let i = 0; i < 5; i++ ) {
+		await insertOrUpdate( path, content );
+	}
+
+	const text = await readFile( path, 'utf8' );
+	// Exactly one REAL opening marker (at the start of a line) and one closing.
+	const realStarts = text.match( /^<!-- seomi-wp-mcp:start -->$/gm ) || [];
+	const realEnds = text.match( /^<!-- seomi-wp-mcp:end -->$/gm ) || [];
+	assert.equal( realStarts.length, 1, 'should be exactly one opening marker line' );
+	assert.equal( realEnds.length, 1, 'should be exactly one closing marker line' );
+	// The trailing sentence appears once — body is not duplicated.
+	const trailing = text.match( /Trailing sentence after the inline mentions\./g ) || [];
+	assert.equal( trailing.length, 1, 'body content should appear exactly once' );
+	await rm( dir, { recursive: true, force: true } );
+} );
+
+test( 'insertOrUpdate heals a file previously corrupted by non-greedy matching', async () => {
+	const dir = await tmp();
+	const path = join( dir, 'CLAUDE.md' );
+	// Simulate the corruption produced by older versions: multiple orphan
+	// start/end markers + leftover tail content scattered around.
+	const corrupted = [
+		'# Top of file',
+		'',
+		'<!-- seomi-wp-mcp:start -->',
+		'Old block 1 body',
+		'<!-- seomi-wp-mcp:end -->',
+		'orphan tail 1',
+		'<!-- seomi-wp-mcp:end -->',
+		'',
+		'<!-- seomi-wp-mcp:start -->',
+		'Old block 2 body',
+		'<!-- seomi-wp-mcp:end -->',
+		'',
+		'# Bottom',
+		'',
+	].join( '\n' );
+	await writeFile( path, corrupted, 'utf8' );
+
+	await insertOrUpdate( path, 'CLEAN BODY' );
+
+	const text = await readFile( path, 'utf8' );
+	const realStarts = text.match( /<!-- seomi-wp-mcp:start -->/g ) || [];
+	const realEnds = text.match( /<!-- seomi-wp-mcp:end -->/g ) || [];
+	assert.equal( realStarts.length, 1, 'corruption should collapse into one start marker' );
+	assert.equal( realEnds.length, 1, 'corruption should collapse into one end marker' );
+	assert.ok( text.includes( 'CLEAN BODY' ) );
+	assert.ok( ! text.includes( 'Old block 1' ) );
+	assert.ok( ! text.includes( 'Old block 2' ) );
+	assert.ok( ! text.includes( 'orphan tail' ) );
+	assert.ok( text.includes( '# Top' ) );
+	assert.ok( text.includes( '# Bottom' ) );
+	await rm( dir, { recursive: true, force: true } );
+} );

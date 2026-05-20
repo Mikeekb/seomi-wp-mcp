@@ -17,7 +17,7 @@
 
 import { input, password, select, confirm } from '@inquirer/prompts';
 import { existsSync } from 'node:fs';
-import { readFile, writeFile, mkdir, cp } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, cp, rm } from 'node:fs/promises';
 import { join, resolve as resolvePath } from 'node:path';
 import { spawn } from 'node:child_process';
 import { logger } from '../lib/logger.mjs';
@@ -258,6 +258,10 @@ async function connectMuPlugin( cwd, mode ) {
 async function installAifSkill( cwd ) {
 	const src = join( pkgRoot(), 'skills', 'aif-wp-mcp' );
 	const dest = join( cwd, '.claude', 'skills', 'aif-wp-mcp' );
+	// Wipe the destination first so files removed in a newer skill version
+	// don't linger on re-install. `cp --force` overwrites but never deletes
+	// stale entries — that breaks update-by-reinstall semantics.
+	await rm( dest, { recursive: true, force: true } );
 	await mkdir( dest, { recursive: true } );
 	await cp( src, dest, { recursive: true, force: true } );
 	logger.success( `Installed aif-wp-mcp skill at .claude/skills/aif-wp-mcp/` );

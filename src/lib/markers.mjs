@@ -9,13 +9,26 @@
  * - hasBlock(filePath, opts) — boolean check.
  *
  * Safe to call repeatedly. Preserves all surrounding content verbatim.
+ *
+ * Matching is GREEDY (first `:start` to LAST `:end`): older non-greedy
+ * versions of this module shipped a template whose body itself mentioned the
+ * literal markers, which caused the non-greedy regex to match only up to the
+ * first inline `:end` mention and leave orphan tails accumulating on each
+ * `init` run. Greedy matching collapses any such corruption into a single
+ * fresh block, and `stripOrphanMarkers` cleans up stray marker lines left
+ * outside the matched span.
  */
 
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { dirname } from 'node:path';
+import { logger } from './logger.mjs';
 
 const DEFAULT_NAMESPACE = 'seomi-wp-mcp';
+
+function escapeRe( s ) {
+	return s.replace( /[.*+?^${}()|[\]\\]/g, '\\$&' );
+}
 
 function buildMarkers( namespace ) {
 	return {
@@ -24,20 +37,47 @@ function buildMarkers( namespace ) {
 	};
 }
 
-function buildRegex( namespace ) {
-	const ns = namespace.replace( /[.*+?^${}()|[\]\\]/g, '\\$&' );
-	// Greedy/global, multi-line. Match optional trailing newline so the block
-	// is removed cleanly without leaving a blank line behind.
+/**
+ * GREEDY: from the first `:start` to the LAST `:end`. No `g` flag — we want
+ * a single match covering all corrupted/duplicated content as one span.
+ */
+function buildGreedyRegex( namespace ) {
+	const ns = escapeRe( namespace );
 	return new RegExp(
-		`<!--\\s*${ ns }:start\\s*-->[\\s\\S]*?<!--\\s*${ ns }:end\\s*-->\\n?`,
-		'g'
+		`<!--\\s*${ ns }:start\\s*-->[\\s\\S]*<!--\\s*${ ns }:end\\s*-->\\n?`
 	);
+}
+
+/**
+ * Matches a standalone marker line (whitespace-only line containing just the
+ * start or end marker). Used to clean orphan markers left outside the main
+ * managed span by older broken installs.
+ */
+function buildOrphanLineRegex( namespace ) {
+	const ns = escapeRe( namespace );
+	return new RegExp(
+		`^[ \\t]*<!--\\s*${ ns }:(?:start|end)\\s*-->[ \\t]*\\r?\\n?`,
+		'gm'
+	);
+}
+
+/**
+ * Remove standalone marker lines from `text` EXCEPT inside `block` (the new
+ * managed block we are about to write). When `block` is empty, strip
+ * everywhere.
+ */
+function stripOrphanMarkers( text, namespace, block ) {
+	const lineRegex = buildOrphanLineRegex( namespace );
+	if ( ! block ) return text.replace( lineRegex, '' );
+	const parts = text.split( block );
+	if ( parts.length === 1 ) return text.replace( lineRegex, '' );
+	return parts.map( ( p ) => p.replace( lineRegex, '' ) ).join( block );
 }
 
 export async function hasBlock( filePath, { namespace = DEFAULT_NAMESPACE } = {} ) {
 	if ( ! existsSync( filePath ) ) return false;
 	const text = await readFile( filePath, 'utf8' );
-	return buildRegex( namespace ).test( text );
+	return buildGreedyRegex( namespace ).test( text );
 }
 
 export async function insertOrUpdate( filePath, content, { namespace = DEFAULT_NAMESPACE, appendIfNew = true } = {} ) {
@@ -51,30 +91,41 @@ export async function insertOrUpdate( filePath, content, { namespace = DEFAULT_N
 	}
 
 	const text = await readFile( filePath, 'utf8' );
-	const regex = buildRegex( namespace );
+	const greedyRegex = buildGreedyRegex( namespace );
 
-	if ( regex.test( text ) ) {
-		const updated = text.replace( regex, block );
-		if ( updated !== text ) {
-			await writeFile( filePath, updated, 'utf8' );
-			return { action: 'updated', filePath };
+	if ( greedyRegex.test( text ) ) {
+		let updated = text.replace( greedyRegex, block );
+		updated = stripOrphanMarkers( updated, namespace, block );
+		if ( updated === text ) {
+			return { action: 'unchanged', filePath };
 		}
-		return { action: 'unchanged', filePath };
+		await writeFile( filePath, updated, 'utf8' );
+		logger.debug( `[FIX] markers: replaced managed block in ${ filePath }` );
+		return { action: 'updated', filePath };
 	}
 
+	// No managed span — but stray marker lines from past corruption may still
+	// linger. Drop them before deciding whether to append.
+	const cleaned = stripOrphanMarkers( text, namespace, '' );
+
 	if ( ! appendIfNew ) {
+		if ( cleaned !== text ) {
+			await writeFile( filePath, cleaned, 'utf8' );
+			return { action: 'cleaned', filePath };
+		}
 		return { action: 'not-found', filePath };
 	}
 
-	const sep = text.length > 0 && ! text.endsWith( '\n' ) ? '\n\n' : '\n';
-	await writeFile( filePath, text + sep + block, 'utf8' );
+	const sep = cleaned.length > 0 && ! cleaned.endsWith( '\n' ) ? '\n\n' : '\n';
+	await writeFile( filePath, cleaned + sep + block, 'utf8' );
 	return { action: 'appended', filePath };
 }
 
 export async function removeBlock( filePath, { namespace = DEFAULT_NAMESPACE } = {} ) {
 	if ( ! existsSync( filePath ) ) return { action: 'not-found', filePath };
 	const text = await readFile( filePath, 'utf8' );
-	const updated = text.replace( buildRegex( namespace ), '' );
+	let updated = text.replace( buildGreedyRegex( namespace ), '' );
+	updated = stripOrphanMarkers( updated, namespace, '' );
 	if ( updated === text ) return { action: 'unchanged', filePath };
 	await writeFile( filePath, updated, 'utf8' );
 	return { action: 'removed', filePath };

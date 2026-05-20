@@ -110,10 +110,13 @@ export async function updateCommand( opts ) {
 	const after = await readPluginVersion( cwd );
 	logger.success( `Plugin version after: ${ after ?? '(unknown)' }` );
 
-	// Regenerate skill files (CLI-managed).
+	// Regenerate skill files (CLI-managed). Wipe first so files removed in a
+	// newer skill version don't linger — `cp --force` overwrites but never
+	// deletes stale entries.
 	logger.step( 'Refreshing aif-wp-mcp skill' );
 	const skillSrc = join( pkgRoot(), 'skills', 'aif-wp-mcp' );
 	const skillDest = join( cwd, '.claude/skills/aif-wp-mcp' );
+	await rm( skillDest, { recursive: true, force: true } );
 	await mkdir( skillDest, { recursive: true } );
 	await cp( skillSrc, skillDest, { recursive: true, force: true } );
 

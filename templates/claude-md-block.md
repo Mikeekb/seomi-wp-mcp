@@ -41,9 +41,9 @@ This integration is installed and maintained by the **`@seomi/wp-mcp`** npm CLI:
 - `seomi-wp-mcp doctor` — diagnose env, mu-plugin, MCP server, plugin deps
 - `seomi-wp-mcp doctor --fix` — auto-install/activate Abilities API + MCP Adapter
 
-Credentials live in `.claude/.env` (gitignored). The block between
-`<!-- seomi-wp-mcp:start -->` and `<!-- seomi-wp-mcp:end -->` is **CLI-managed** —
-edit it via `seomi-wp-mcp update`, not by hand.
+Credentials live in `.claude/.env` (gitignored). The managed block
+(between the `seomi-wp-mcp:start` / `seomi-wp-mcp:end` HTML comments) is
+**CLI-managed** — edit it via `seomi-wp-mcp update`, not by hand.
 
 ## Hard rules
 
