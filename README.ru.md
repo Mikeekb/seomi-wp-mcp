@@ -17,7 +17,7 @@ seomi-wp-mcp init
 3. **Автоматически установит** WP-плагины-зависимости (`abilities-api` и `mcp-adapter`) через WP-CLI, если он есть, либо распакует их в `wp-content/plugins/` как фолбэк.
 4. Подключит mu-плагин [`seomi/wp-mcp-abilities`](https://github.com/Mikeekb/wp-mcp-abilities) как git submodule (или через Composer / plain clone — на выбор).
 5. Положит скилл `aif-wp-mcp` в `.claude/skills/`, чтобы будущие `/aif`-сессии его видели.
-6. Вставит managed-блок в `CLAUDE.md` между маркерами `<!-- seomi-wp-mcp:start -->`.
+6. Вставит managed-блок в основной файл AI-инструкций проекта (`AGENTS.md` или `CLAUDE.md`) между маркерами `<!-- seomi-wp-mcp:start -->` — файл определяется автоматически; если в проекте есть оба, блок синхронизируется в оба файла. Если ни одного нет — `init` спросит, какой создать (по умолчанию `AGENTS.md` как универсальный стандарт).
 7. Запишет **project-scope** записи MCP-серверов в `.mcp.json` в корне проекта (каждый проект видит свой `wordpress-local`/`wordpress-prod`, никаких пересечений). Локальный сервер — stdio через WP-CLI `mcp-adapter serve`; прод — тот же транспорт, но с `--ssh=`, так что команды выполняются на проде через SSH.
 
 Можно перезапускать сколько угодно — **идемпотентно**. Ничего не дублируется, ничего не затирается.
@@ -42,7 +42,7 @@ seomi-wp-mcp init
 | Команда                              | Что делает                                                              |
 |--------------------------------------|-------------------------------------------------------------------------|
 | `seomi-wp-mcp init`                  | Интерактивная первоначальная настройка (см. выше)                       |
-| `seomi-wp-mcp update`                | Подтягивает свежую версию mu-плагина и пересобирает managed-блок CLAUDE.md |
+| `seomi-wp-mcp update`                | Подтягивает свежую версию mu-плагина и пересобирает managed-блок в `AGENTS.md`/`CLAUDE.md` |
 | `seomi-wp-mcp doctor`                | Диагностика: env, mu-плагин, регистрация MCP-сервера, плагины-зависимости |
 | `seomi-wp-mcp doctor --fix`          | Авто-починка: ставит/активирует Abilities API + MCP Adapter             |
 | `seomi-wp-mcp --verbose <command>`   | Включает debug-логи для любой команды                                   |
@@ -129,7 +129,7 @@ npx skills add Mikeekb/seomi-wp-mcp
 ## Контракт идемпотентности
 
 - `.claude/.env` обновляется методом **merge** — ключи, которые ты не трогал (комментарии, креды для deploy, third-party токены) сохраняются.
-- Блок CLAUDE.md обёрнут в маркеры `<!-- seomi-wp-mcp:start --> ... <!-- seomi-wp-mcp:end -->` и регенерируется внутри них; всё что вне маркеров — нетронуто.
+- Managed-блок в `AGENTS.md` / `CLAUDE.md` обёрнут в маркеры `<!-- seomi-wp-mcp:start --> ... <!-- seomi-wp-mcp:end -->` и регенерируется внутри них; всё что вне маркеров — нетронуто. CLI автоматически определяет, какой файл использует проект (или оба) — см. `src/lib/agent-md-target.mjs`.
 - Регистрация MCP-серверов проверяет `claude mcp list` перед `claude mcp add` — дубликаты не появятся.
 - `wp plugin is-active <slug>` проверяется перед install — повторных установок нет.
 
@@ -157,7 +157,7 @@ skills/
   aif-wp-mcp/           Скилл в стандартном пути (совместим с npx skills);
                         копируется в .claude/skills/ из этого источника на init
 templates/
-  claude-md-block.md    Managed-блок, который вставляется в CLAUDE.md
+  claude-md-block.md    Managed-блок, который вставляется в AGENTS.md / CLAUDE.md
   claude-dotenv/        Референс .env.example
 test/                   Тесты под node:test
 ```

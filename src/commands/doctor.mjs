@@ -18,10 +18,10 @@ import { spawn } from 'node:child_process';
 import { logger } from '../lib/logger.mjs';
 import { readMcpJson } from '../lib/claude-mcp.mjs';
 import { ensurePlugins } from '../lib/wp-plugin-installer.mjs';
+import { detectAgentMdTargets } from '../lib/agent-md-target.mjs';
 
 const MU_PLUGIN_HEADER = 'wp-content/mu-plugins/seomi-mcp-abilities/seomi-mcp-abilities.php';
 const MU_LOADER_FILE = 'wp-content/mu-plugins/mcp-abilities.php';
-const CLAUDE_MD_FILE = 'CLAUDE.md';
 const MARKER_BLOCK_RE = /<!--\s*seomi-wp-mcp:start\s*-->([\s\S]*?)<!--\s*seomi-wp-mcp:end\s*-->/;
 const ACCESS_SECTION_HEADING = '## Credentials & remote access';
 const SSH_PROBE_TIMEOUT_MS = 12000;
@@ -136,18 +136,18 @@ async function httpProbe( url, user, password ) {
 }
 
 /**
- * Inspect the seomi-wp-mcp managed block inside CLAUDE.md. Catches the two
- * regressions agents have hit in real projects:
+ * Inspect the seomi-wp-mcp managed block inside one specific agent-instructions
+ * file (AGENTS.md or CLAUDE.md). Catches the two regressions agents have hit
+ * in real projects:
  *   1. Literal "undefined" inlined when a missing env var was passed to
  *      `replaceAll` (broken renderer / stale package version).
  *   2. Missing "Credentials & remote access" H2 — means the block was written
  *      by an older version that did not surface SSH/credential keys, and the
  *      agent has to guess where prod access lives.
  */
-async function inspectClaudeMdBlock( cwd ) {
-	const path = join( cwd, CLAUDE_MD_FILE );
-	if ( ! existsSync( path ) ) return { exists: false };
-	const text = await readFile( path, 'utf8' );
+async function inspectAgentMdBlock( filePath ) {
+	if ( ! existsSync( filePath ) ) return { exists: false };
+	const text = await readFile( filePath, 'utf8' );
 	const m = text.match( MARKER_BLOCK_RE );
 	if ( ! m ) return { exists: true, blockPresent: false };
 	const body = m[ 1 ];
@@ -307,22 +307,41 @@ export async function doctorCommand( opts ) {
 		}
 	}
 
-	// 6. CLAUDE.md managed block sanity (renderer regression + access section).
-	const md = await inspectClaudeMdBlock( cwd );
-	if ( ! md.exists ) {
-		report.warn( 'CLAUDE.md not found — skipping managed-block checks' );
-	} else if ( ! md.blockPresent ) {
-		report.warn( 'CLAUDE.md found, but seomi-wp-mcp managed block missing', 'Run `seomi-wp-mcp update` (or `init`) to insert it' );
+	// 6. Agent-instructions managed-block sanity (renderer regression + access
+	//    section). Detects which file(s) the project uses — AGENTS.md and/or
+	//    CLAUDE.md — and inspects each one. When both coexist, warns that Claude
+	//    Code will only read CLAUDE.md.
+	const detected = await detectAgentMdTargets( { cwd, interactive: false } );
+	const inspectTargets = detected.source === 'default' ? [] : detected.targets;
+	logger.info( `[doctor] inspecting managed block in: ${ inspectTargets.length ? inspectTargets.map( ( p ) => p.split( /[\\/]/ ).pop() ).join( ', ' ) : '(none)' }` );
+
+	if ( inspectTargets.length === 0 ) {
+		report.warn( 'No AGENTS.md or CLAUDE.md found — skipping managed-block checks', 'Run `seomi-wp-mcp init`' );
 	} else {
-		if ( md.hasUndefined ) {
-			report.fail( 'CLAUDE.md managed block contains literal "undefined" — stale or broken render', 'Re-install/upgrade @seomi/wp-mcp and run `seomi-wp-mcp update`' );
-		} else {
-			report.pass( 'CLAUDE.md managed block renders cleanly (no "undefined")' );
+		if ( detected.source === 'both' ) {
+			report.warn( 'Both AGENTS.md and CLAUDE.md exist — block is synced to both, but Claude Code reads CLAUDE.md and ignores AGENTS.md. Prefer keeping only AGENTS.md.' );
 		}
-		if ( ! md.hasAccessSection ) {
-			report.warn( `CLAUDE.md managed block has no "${ ACCESS_SECTION_HEADING }" section`, 'Older CLI version — run `seomi-wp-mcp update` to refresh' );
-		} else {
-			report.pass( 'CLAUDE.md managed block includes "Credentials & remote access"' );
+		for ( const targetPath of inspectTargets ) {
+			const name = targetPath.split( /[\\/]/ ).pop();
+			const md = await inspectAgentMdBlock( targetPath );
+			if ( ! md.exists ) {
+				report.warn( `${ name } not found — skipping managed-block checks` );
+				continue;
+			}
+			if ( ! md.blockPresent ) {
+				report.warn( `${ name } found, but seomi-wp-mcp managed block missing`, 'Run `seomi-wp-mcp update` (or `init`) to insert it' );
+				continue;
+			}
+			if ( md.hasUndefined ) {
+				report.fail( `${ name } managed block contains literal "undefined" — stale or broken render`, 'Re-install/upgrade @seomi/wp-mcp and run `seomi-wp-mcp update`' );
+			} else {
+				report.pass( `${ name } managed block renders cleanly (no "undefined")` );
+			}
+			if ( ! md.hasAccessSection ) {
+				report.warn( `${ name } managed block has no "${ ACCESS_SECTION_HEADING }" section`, 'Older CLI version — run `seomi-wp-mcp update` to refresh' );
+			} else {
+				report.pass( `${ name } managed block includes "Credentials & remote access"` );
+			}
 		}
 	}
 

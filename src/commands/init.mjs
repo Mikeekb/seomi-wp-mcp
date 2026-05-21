@@ -24,6 +24,7 @@ import { logger } from '../lib/logger.mjs';
 import { mergeEnv } from '../lib/env-writer.mjs';
 import { insertOrUpdate as updateMarkerBlock } from '../lib/markers.mjs';
 import { renderClaudeMdBlock } from '../lib/claude-md-renderer.mjs';
+import { detectAgentMdTargets } from '../lib/agent-md-target.mjs';
 import {
 	addServerEntry as claudeAddServerEntry,
 	buildStdioLocalConfig,
@@ -269,12 +270,23 @@ async function installAifSkill( cwd ) {
 	return dest;
 }
 
-async function updateClaudeMd( cwd, env ) {
+/**
+ * Write the managed seomi-wp-mcp block into every detected agent-instructions
+ * file (AGENTS.md / CLAUDE.md / both). Returns an array of per-target results
+ * so the summary line can report the action for each file.
+ */
+async function updateAgentMd( cwd, env, targets ) {
 	const templatePath = join( pkgRoot(), 'templates', 'claude-md-block.md' );
 	const block = await renderClaudeMdBlock( env, templatePath );
-	const r = await updateMarkerBlock( join( cwd, 'CLAUDE.md' ), block );
-	logger.success( `CLAUDE.md: ${ r.action }` );
-	return r;
+	const results = [];
+	for ( const targetPath of targets ) {
+		const name = targetPath.split( /[\\/]/ ).pop();
+		logger.step( `Updating ${ name } with managed seomi-wp-mcp block` );
+		const r = await updateMarkerBlock( targetPath, block );
+		logger.success( `${ name }: ${ r.action }` );
+		results.push( { name, action: r.action, filePath: r.filePath } );
+	}
+	return results;
 }
 
 export async function initCommand( opts ) {
@@ -387,10 +399,31 @@ export async function initCommand( opts ) {
 		default: true,
 	} );
 
-	const updateClaudeFile = await confirm( {
-		message: 'Update CLAUDE.md with the managed seomi-wp-mcp block?',
-		default: true,
-	} );
+	// Detect which agent-instructions file(s) the project actually uses, so the
+	// confirm question references the real target(s) instead of hard-coded
+	// CLAUDE.md. If neither file exists, fall back to an interactive picker
+	// (AGENTS.md is the universal default).
+	let agentMdTargets;
+	const detected = await detectAgentMdTargets( { cwd, interactive: false } );
+	if ( detected.targets.length === 0 || detected.source === 'default' ) {
+		// `default` means neither file is on disk. Prompt the user so they
+		// consciously pick AGENTS.md vs CLAUDE.md instead of silently creating
+		// the universal default behind their back.
+		const interactiveRes = await detectAgentMdTargets( { cwd, interactive: true } );
+		agentMdTargets = interactiveRes.targets;
+	} else {
+		agentMdTargets = detected.targets;
+	}
+	const targetLabel = agentMdTargets.length
+		? agentMdTargets.map( ( p ) => p.split( /[\\/]/ ).pop() ).join( ', ' )
+		: '(no file selected)';
+
+	const updateAgentFile = agentMdTargets.length > 0
+		? await confirm( {
+			message: `Update ${ targetLabel } with the managed seomi-wp-mcp block?`,
+			default: true,
+		} )
+		: false;
 
 	// 1. Write .claude/.env
 	logger.step( 'Writing .claude/.env' );
@@ -430,10 +463,12 @@ export async function initCommand( opts ) {
 		skillRes = await installAifSkill( cwd );
 	}
 
-	// 5. Update CLAUDE.md
-	let claudeMdRes = null;
-	if ( updateClaudeFile ) {
-		claudeMdRes = await updateClaudeMd( cwd, env );
+	// 5. Update agent-instructions file(s) — AGENTS.md and/or CLAUDE.md, whichever
+	//    the project actually uses (and both when both exist, to keep Claude Code
+	//    and other agents on the same page).
+	let agentMdResults = null;
+	if ( updateAgentFile && agentMdTargets.length > 0 ) {
+		agentMdResults = await updateAgentMd( cwd, env, agentMdTargets );
 	}
 
 	// 6. Install plugin deps on PROD via WP-CLI --ssh (if asked).
@@ -512,7 +547,7 @@ export async function initCommand( opts ) {
 		`  mu-plugin (prod)         — ${ prodMuRes ? prodMuRes.action : 'skipped' }`,
 		sshKeyLine,
 		`  aif-wp-mcp skill         — ${ skillRes ? 'installed' : 'skipped' }`,
-		`  CLAUDE.md block          — ${ claudeMdRes ? claudeMdRes.action : 'skipped' }`,
+		`  Agent-md block           — ${ agentMdResults ? agentMdResults.map( ( r ) => r.name + ':' + r.action ).join( ', ' ) : 'skipped' }`,
 		`  .mcp.json (local server) — ${ localRes ? localRes.action + ' (' + env.WP_LOCAL_MCP_SERVER + ')' : 'skipped (no local)' }`,
 		`  .mcp.json (prod server)  — ${ prodRes ? prodRes.action + ' (' + env.WP_PROD_MCP_SERVER + ')' : 'skipped' }`,
 	];

@@ -108,6 +108,47 @@ test( 'insertOrUpdate stays single-block when content itself mentions markers', 
 	await rm( dir, { recursive: true, force: true } );
 } );
 
+test( 'insertOrUpdate keeps AGENTS.md and CLAUDE.md state independent in the same dir', async () => {
+	// Multi-target scenario: init now writes the managed block into BOTH files
+	// when both exist. Each call must touch only its own file and leave the
+	// other untouched.
+	const dir = await tmp();
+	const agentsPath = join( dir, 'AGENTS.md' );
+	const claudePath = join( dir, 'CLAUDE.md' );
+	await writeFile( agentsPath, '# AGENTS map\n\nExisting agents prose.\n', 'utf8' );
+	await writeFile( claudePath, '# Claude config\n\nExisting claude prose.\n', 'utf8' );
+
+	const block = 'MANAGED block content';
+
+	const r1 = await insertOrUpdate( agentsPath, block );
+	const r2 = await insertOrUpdate( claudePath, block );
+	assert.equal( r1.action, 'appended' );
+	assert.equal( r2.action, 'appended' );
+
+	const agentsText = await readFile( agentsPath, 'utf8' );
+	const claudeText = await readFile( claudePath, 'utf8' );
+	assert.ok( agentsText.includes( 'Existing agents prose.' ) );
+	assert.ok( agentsText.includes( block ) );
+	assert.ok( ! agentsText.includes( 'Existing claude prose.' ) );
+	assert.ok( claudeText.includes( 'Existing claude prose.' ) );
+	assert.ok( claudeText.includes( block ) );
+	assert.ok( ! claudeText.includes( 'Existing agents prose.' ) );
+
+	// Second round on the same dir — both must be `unchanged`, no duplication.
+	const r1b = await insertOrUpdate( agentsPath, block );
+	const r2b = await insertOrUpdate( claudePath, block );
+	assert.equal( r1b.action, 'unchanged' );
+	assert.equal( r2b.action, 'unchanged' );
+
+	// Marker count stays exactly one in each file.
+	const agentsAfter = await readFile( agentsPath, 'utf8' );
+	const claudeAfter = await readFile( claudePath, 'utf8' );
+	assert.equal( ( agentsAfter.match( /<!-- seomi-wp-mcp:start -->/g ) || [] ).length, 1 );
+	assert.equal( ( claudeAfter.match( /<!-- seomi-wp-mcp:start -->/g ) || [] ).length, 1 );
+
+	await rm( dir, { recursive: true, force: true } );
+} );
+
 test( 'insertOrUpdate heals a file previously corrupted by non-greedy matching', async () => {
 	const dir = await tmp();
 	const path = join( dir, 'CLAUDE.md' );

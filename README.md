@@ -17,7 +17,7 @@ That single `init` will:
 3. **Auto-install** the WP plugin dependencies (`abilities-api` and `mcp-adapter`) via WP-CLI when available, or extract them into `wp-content/plugins/` as a fallback.
 4. Connect the [`seomi/wp-mcp-abilities`](https://github.com/Mikeekb/wp-mcp-abilities) mu-plugin as a git submodule (or via Composer / plain clone).
 5. Drop the `aif-wp-mcp` skill into `.claude/skills/` so future `/aif`-style sessions see it.
-6. Insert a managed block into `CLAUDE.md` between `<!-- seomi-wp-mcp:start -->` markers.
+6. Insert a managed block into the project's main agent-instructions file (`AGENTS.md` or `CLAUDE.md`) between `<!-- seomi-wp-mcp:start -->` markers — detected automatically; if both files exist, the block is kept in sync in both. If neither exists, `init` asks which to create (default: `AGENTS.md`, the universal standard).
 7. Write **project-scope** MCP server entries to `.mcp.json` in the project root (so each project sees its own `wordpress-local`/`wordpress-prod`, no cross-project leakage). Local server uses stdio via WP-CLI `mcp-adapter serve`; prod uses the same transport but with WP-CLI `--ssh=` so commands run on the production server.
 
 Re-run any time — it's **idempotent**. Nothing duplicates, nothing gets clobbered.
@@ -42,7 +42,7 @@ That's ~30 minutes of error-prone manual work, repeated for every WP project. `s
 | Command                              | What it does                                                           |
 |--------------------------------------|------------------------------------------------------------------------|
 | `seomi-wp-mcp init`                  | Interactive first-time setup (see above)                               |
-| `seomi-wp-mcp update`                | Pull the latest mu-plugin and regenerate the managed CLAUDE.md block   |
+| `seomi-wp-mcp update`                | Pull the latest mu-plugin and regenerate the managed block in `AGENTS.md`/`CLAUDE.md` |
 | `seomi-wp-mcp doctor`                | Diagnose env, mu-plugin presence, MCP server registration, plugin deps |
 | `seomi-wp-mcp doctor --fix`          | Auto-install/activate Abilities API + MCP Adapter if missing           |
 | `seomi-wp-mcp --verbose <command>`   | Add debug-level logging to any command                                 |
@@ -131,7 +131,7 @@ The default refs are the `trunk` branches of `WordPress/abilities-api` and `Word
 ## Idempotency contract
 
 - `.claude/.env` is merged — keys you didn't touch (comments, deploy creds, third-party tokens) are preserved.
-- The CLAUDE.md block is wrapped in `<!-- seomi-wp-mcp:start --> ... <!-- seomi-wp-mcp:end -->` markers and is regenerated in place; everything outside the markers stays untouched.
+- The managed block in `AGENTS.md` / `CLAUDE.md` is wrapped in `<!-- seomi-wp-mcp:start --> ... <!-- seomi-wp-mcp:end -->` markers and is regenerated in place; everything outside the markers stays untouched. The CLI auto-detects which file the project uses (or both) — see `src/lib/agent-md-target.mjs`.
 - MCP server registration checks `claude mcp list` before `claude mcp add` — no duplicates.
 - `wp plugin is-active <slug>` is checked before install — no re-installs.
 
@@ -159,7 +159,7 @@ skills/
   aif-wp-mcp/           Standard-path skill (npx skills compatible);
                         also copied into .claude/skills/ on init by our CLI
 templates/
-  claude-md-block.md    Managed block injected into CLAUDE.md
+  claude-md-block.md    Managed block injected into AGENTS.md / CLAUDE.md
   claude-dotenv/        Reference .env.example
 test/                   Node test runner suites
 ```

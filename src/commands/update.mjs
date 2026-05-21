@@ -15,6 +15,7 @@ import { spawn } from 'node:child_process';
 import { logger } from '../lib/logger.mjs';
 import { insertOrUpdate as updateMarkerBlock } from '../lib/markers.mjs';
 import { renderClaudeMdBlock } from '../lib/claude-md-renderer.mjs';
+import { detectAgentMdTargets } from '../lib/agent-md-target.mjs';
 
 const MU_PLUGIN_DIR = 'wp-content/mu-plugins/seomi-mcp-abilities';
 const PLUGIN_HEADER_FILE = MU_PLUGIN_DIR + '/seomi-mcp-abilities.php';
@@ -121,13 +122,26 @@ export async function updateCommand( opts ) {
 	await mkdir( skillDest, { recursive: true } );
 	await cp( skillSrc, skillDest, { recursive: true, force: true } );
 
-	// Regenerate CLAUDE.md block.
-	logger.step( 'Regenerating CLAUDE.md managed block' );
+	// Regenerate the managed block in whichever agent-instructions file the
+	// project uses (AGENTS.md and/or CLAUDE.md). update runs non-interactively —
+	// if neither file exists, warn and skip; the user should run init first.
 	const env = await readEnv( cwd );
 	const templatePath = join( pkgRoot(), 'templates', 'claude-md-block.md' );
 	const block = await renderClaudeMdBlock( env, templatePath );
-	const r = await updateMarkerBlock( join( cwd, 'CLAUDE.md' ), block );
-	logger.success( `CLAUDE.md: ${ r.action }` );
+	const detected = await detectAgentMdTargets( { cwd, interactive: false } );
+	const targets = detected.source === 'default' ? [] : detected.targets;
+
+	if ( targets.length === 0 ) {
+		logger.warn( 'No AGENTS.md or CLAUDE.md found — skipping managed-block regeneration. Run `seomi-wp-mcp init` first.' );
+	} else {
+		const targetNames = targets.map( ( p ) => p.split( /[\\/]/ ).pop() ).join( ', ' );
+		logger.step( `Regenerating managed block (targets: ${ targetNames })` );
+		for ( const targetPath of targets ) {
+			const name = targetPath.split( /[\\/]/ ).pop();
+			const r = await updateMarkerBlock( targetPath, block );
+			logger.success( `${ name }: ${ r.action }` );
+		}
+	}
 
 	logger.success( 'Update complete.' );
 	return 0;
