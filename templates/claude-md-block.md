@@ -1,3 +1,5 @@
+{{ACCESS_SECTION}}
+
 ## Custom MCP Abilities (mu-plugin)
 
 This project exposes custom WordPress abilities for AI agents through the must-use plugin
@@ -7,9 +9,7 @@ here as a git submodule (or composer-managed dependency) at
 `wp-content/mu-plugins/mcp-abilities.php` bootstraps the package (WordPress only auto-loads
 mu-plugin files in the directory root, not subdirectories).
 
-Abilities are served via the **`{{WP_LOCAL_MCP_SERVER}}`** MCP server (production:
-**`{{WP_PROD_MCP_SERVER}}`**) under the `seomi/*` namespace. Call
-`mcp__{{WP_LOCAL_MCP_SERVER}}__mcp-adapter-discover-abilities` to list them at any time.
+{{ABILITIES_INTRO}}
 
 **Use these abilities first** for any read/write of content stored in the WordPress DB (posts,
 pages, categories, tags, term descriptions, media, and — when WooCommerce is active —
@@ -40,10 +40,6 @@ This integration is installed and maintained by the **`@seomi/wp-mcp`** npm CLI:
 - `seomi-wp-mcp update` — pull latest mu-plugin and regenerate this CLAUDE.md block
 - `seomi-wp-mcp doctor` — diagnose env, mu-plugin, MCP server, plugin deps
 - `seomi-wp-mcp doctor --fix` — auto-install/activate Abilities API + MCP Adapter
-
-Credentials live in `.claude/.env` (gitignored). The managed block
-(between the `seomi-wp-mcp:start` / `seomi-wp-mcp:end` HTML comments) is
-**CLI-managed** — edit it via `seomi-wp-mcp update`, not by hand.
 
 ## Hard rules
 
@@ -147,7 +143,7 @@ git commit -m "chore(mcp-abilities): bump submodule with seomi/<new-ability>"
 ```
 
 **7. Verify on the live MCP server.** Call
-`mcp__{{WP_LOCAL_MCP_SERVER}}__mcp-adapter-discover-abilities` and confirm the new ability
+`{{DISCOVER_COMMAND}}` and confirm the new ability
 appears. If PHP-FPM has an aggressive opcache, the live discover may lag the WP-CLI smoke;
 restart PHP-FPM or wait for opcache TTL if so.
 

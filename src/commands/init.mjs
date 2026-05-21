@@ -23,6 +23,7 @@ import { spawn } from 'node:child_process';
 import { logger } from '../lib/logger.mjs';
 import { mergeEnv } from '../lib/env-writer.mjs';
 import { insertOrUpdate as updateMarkerBlock } from '../lib/markers.mjs';
+import { renderClaudeMdBlock } from '../lib/claude-md-renderer.mjs';
 import {
 	addServerEntry as claudeAddServerEntry,
 	buildStdioLocalConfig,
@@ -270,13 +271,8 @@ async function installAifSkill( cwd ) {
 
 async function updateClaudeMd( cwd, env ) {
 	const templatePath = join( pkgRoot(), 'templates', 'claude-md-block.md' );
-	let template = await readFile( templatePath, 'utf8' );
-	template = template
-		.replaceAll( '{{WP_LOCAL_MCP_SERVER}}', env.WP_LOCAL_MCP_SERVER )
-		.replaceAll( '{{WP_PROD_MCP_SERVER}}', env.WP_PROD_MCP_SERVER || '(not configured)' )
-		.replaceAll( '{{WP_LOCAL_URL}}', env.WP_LOCAL_URL );
-
-	const r = await updateMarkerBlock( join( cwd, 'CLAUDE.md' ), template );
+	const block = await renderClaudeMdBlock( env, templatePath );
+	const r = await updateMarkerBlock( join( cwd, 'CLAUDE.md' ), block );
 	logger.success( `CLAUDE.md: ${ r.action }` );
 	return r;
 }

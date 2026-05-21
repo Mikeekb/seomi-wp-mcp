@@ -49,9 +49,37 @@ Treat any of these as a signal to activate this skill:
 If the package is installed globally (`npm i -g @seomi/wp-mcp`), use `seomi-wp-mcp` directly
 without `npx`.
 
-### Production access notes
+### Where credentials and prod access live (read this first)
 
-`init` will offer an optional **SSH key wizard** before any wp-cli-over-SSH calls when the
+**Before searching for SSH, WP-CLI, or prod-host info anywhere else, read `.claude/.env`
+in this project.** It is the single source of truth for credentials this CLI installs.
+Do NOT consult `~/.ssh/config`, host aliases from other projects, or guess from the WP URL
+first — that path has led to wrong-account confusion in real projects (e.g. picking up an
+unrelated `Host` entry left over from another client).
+
+Relevant keys (only the ones for configured targets exist in the file):
+
+| Variable                | Used for                                         |
+|-------------------------|--------------------------------------------------|
+| `WP_LOCAL_*`            | Local WP REST/MCP access                         |
+| `WP_PROD_URL`           | Prod WP base URL                                 |
+| `WP_PROD_USER` / `WP_PROD_APP_PASSWORD` | Prod REST/Application password    |
+| `WP_PROD_MCP_SERVER`    | Prod MCP server name in `.mcp.json`              |
+| `WP_PROD_SSH_HOST`      | Prod SSH host                                    |
+| `WP_PROD_SSH_USER`      | Prod SSH user                                    |
+| `WP_PROD_SSH_PORT`      | Prod SSH port (blank = 22)                       |
+| `WP_PROD_WP_ROOT`       | Absolute WP root path on prod                    |
+| `WP_CLI_PHAR`           | Local wp-cli.phar path                           |
+
+When the user asks the agent to "deploy to prod", "ssh to prod", "run wp-cli on prod", etc.,
+the first action is `cat .claude/.env` (or `Read` of that path) — never `cat ~/.ssh/config`.
+The generated CLAUDE.md managed block (between `seomi-wp-mcp:start` / `:end`) also
+includes a "Credentials & remote access" section with concrete `ssh` / `wp --ssh=...`
+examples derived from these exact env values; use those examples verbatim.
+
+### SSH key wizard
+
+`init` offers an optional **SSH key wizard** before any wp-cli-over-SSH calls when the
 user configures a prod target. It asks for the SSH password once (during `ssh-copy-id`),
 then every subsequent prod operation is passwordless. On managed hosts that only accept keys
 through a control panel (Beget-style), the wizard degrades gracefully — it prints the .pub
