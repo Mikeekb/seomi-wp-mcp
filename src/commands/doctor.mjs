@@ -21,6 +21,10 @@ import { ensurePlugins } from '../lib/wp-plugin-installer.mjs';
 
 const MU_PLUGIN_HEADER = 'wp-content/mu-plugins/seomi-mcp-abilities/seomi-mcp-abilities.php';
 const MU_LOADER_FILE = 'wp-content/mu-plugins/mcp-abilities.php';
+const CLAUDE_MD_FILE = 'CLAUDE.md';
+const MARKER_BLOCK_RE = /<!--\s*seomi-wp-mcp:start\s*-->([\s\S]*?)<!--\s*seomi-wp-mcp:end\s*-->/;
+const ACCESS_SECTION_HEADING = '## Credentials & remote access';
+const SSH_PROBE_TIMEOUT_MS = 12000;
 
 function exec( cmd, args, opts = {} ) {
 	return new Promise( ( resolve ) => {
@@ -128,6 +132,64 @@ async function httpProbe( url, user, password ) {
 			resolve( { ok: false, status: 0, error: 'timeout' } );
 		} );
 		req.end();
+	} );
+}
+
+/**
+ * Inspect the seomi-wp-mcp managed block inside CLAUDE.md. Catches the two
+ * regressions agents have hit in real projects:
+ *   1. Literal "undefined" inlined when a missing env var was passed to
+ *      `replaceAll` (broken renderer / stale package version).
+ *   2. Missing "Credentials & remote access" H2 — means the block was written
+ *      by an older version that did not surface SSH/credential keys, and the
+ *      agent has to guess where prod access lives.
+ */
+async function inspectClaudeMdBlock( cwd ) {
+	const path = join( cwd, CLAUDE_MD_FILE );
+	if ( ! existsSync( path ) ) return { exists: false };
+	const text = await readFile( path, 'utf8' );
+	const m = text.match( MARKER_BLOCK_RE );
+	if ( ! m ) return { exists: true, blockPresent: false };
+	const body = m[ 1 ];
+	return {
+		exists: true,
+		blockPresent: true,
+		hasUndefined: /\bundefined\b/.test( body ),
+		hasAccessSection: body.includes( ACCESS_SECTION_HEADING ),
+	};
+}
+
+/**
+ * Liveness probe for prod SSH. Uses BatchMode (never prompt for password) +
+ * ConnectTimeout (server-side timeout) + a wall-clock fallback that kills the
+ * child if ssh hangs longer than SSH_PROBE_TIMEOUT_MS. Intended as a fast
+ * smoke check: "is the key set up correctly, is the host reachable" — not as
+ * a full health probe of the remote.
+ */
+async function sshLivenessProbe( { host, user, port } ) {
+	const args = [
+		'-o', 'BatchMode=yes',
+		'-o', 'ConnectTimeout=10',
+		'-o', 'StrictHostKeyChecking=accept-new',
+	];
+	if ( port ) args.push( '-p', String( port ) );
+	args.push( `${ user }@${ host }`, 'true' );
+	const child = spawn( 'ssh', args, { shell: false, windowsHide: true } );
+	let stderr = '';
+	child.stderr?.on( 'data', ( d ) => { stderr += d.toString(); } );
+	return new Promise( ( resolve ) => {
+		const killer = setTimeout( () => {
+			try { child.kill( 'SIGKILL' ); } catch {}
+			resolve( { ok: false, code: -1, error: 'wall-clock timeout', stderr } );
+		}, SSH_PROBE_TIMEOUT_MS );
+		child.on( 'error', ( err ) => {
+			clearTimeout( killer );
+			resolve( { ok: false, code: -1, error: err.message, stderr } );
+		} );
+		child.on( 'close', ( code ) => {
+			clearTimeout( killer );
+			resolve( { ok: code === 0, code: code ?? -1, stderr } );
+		} );
 	} );
 }
 
@@ -245,7 +307,43 @@ export async function doctorCommand( opts ) {
 		}
 	}
 
-	// 6. --fix path
+	// 6. CLAUDE.md managed block sanity (renderer regression + access section).
+	const md = await inspectClaudeMdBlock( cwd );
+	if ( ! md.exists ) {
+		report.warn( 'CLAUDE.md not found — skipping managed-block checks' );
+	} else if ( ! md.blockPresent ) {
+		report.warn( 'CLAUDE.md found, but seomi-wp-mcp managed block missing', 'Run `seomi-wp-mcp update` (or `init`) to insert it' );
+	} else {
+		if ( md.hasUndefined ) {
+			report.fail( 'CLAUDE.md managed block contains literal "undefined" — stale or broken render', 'Re-install/upgrade @seomi/wp-mcp and run `seomi-wp-mcp update`' );
+		} else {
+			report.pass( 'CLAUDE.md managed block renders cleanly (no "undefined")' );
+		}
+		if ( ! md.hasAccessSection ) {
+			report.warn( `CLAUDE.md managed block has no "${ ACCESS_SECTION_HEADING }" section`, 'Older CLI version — run `seomi-wp-mcp update` to refresh' );
+		} else {
+			report.pass( 'CLAUDE.md managed block includes "Credentials & remote access"' );
+		}
+	}
+
+	// 7. Prod SSH liveness — only when prod SSH is configured.
+	if ( env?.WP_PROD_SSH_HOST && env.WP_PROD_SSH_USER ) {
+		const r = await sshLivenessProbe( {
+			host: env.WP_PROD_SSH_HOST,
+			user: env.WP_PROD_SSH_USER,
+			port: env.WP_PROD_SSH_PORT,
+		} );
+		if ( r.ok ) {
+			report.pass( `Prod SSH reachable: ${ env.WP_PROD_SSH_USER }@${ env.WP_PROD_SSH_HOST } (passwordless)` );
+		} else {
+			const hint = r.error === 'wall-clock timeout'
+				? `SSH hung >${ SSH_PROBE_TIMEOUT_MS / 1000 }s — wrong host, firewalled, or interactive prompt`
+				: ( r.stderr.trim().split( /\r?\n/ ).pop() || `exit ${ r.code }` );
+			report.warn( `Prod SSH NOT reachable: ${ env.WP_PROD_SSH_USER }@${ env.WP_PROD_SSH_HOST }`, hint );
+		}
+	}
+
+	// 8. --fix path
 	if ( opts.fix && wpRoot && ! depsOk ) {
 		logger.step( 'Auto-fix: installing missing plugin deps' );
 		const r = await ensurePlugins( {
