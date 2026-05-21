@@ -34,6 +34,7 @@ import {
 import { ensurePlugins } from '../lib/wp-plugin-installer.mjs';
 import { ensureSshKey } from '../lib/ssh-key-setup.mjs';
 import { ensureMuPluginOnSsh } from '../lib/ssh-mu-plugin-installer.mjs';
+import { ensureWpCliOnSsh } from '../lib/ssh-wp-cli-installer.mjs';
 
 const MU_PLUGIN_REPO_URL = 'https://github.com/Mikeekb/wp-mcp-abilities.git';
 const MU_PLUGIN_SLUG = 'seomi-mcp-abilities';
@@ -474,7 +475,29 @@ export async function initCommand( opts ) {
 	// 6. Install plugin deps on PROD via WP-CLI --ssh (if asked).
 	let prodDepResults = null;
 	let prodMuRes = null;
+	let prodWpCliRes = null;
 	if ( installDepsProd && prodSsh ) {
+		// 6a. Make sure wp-cli exists on the remote host BEFORE the --ssh plugin
+		//     install runs. Without this, the plugin install boils down to
+		//     `bash: line 1: wp: command not found` for every dep, because
+		//     wp-cli's --ssh mode shells out to `ssh user@host wp <args>` and
+		//     expects wp on the remote's non-interactive PATH.
+		logger.step( 'Ensuring WP-CLI is installed on PROD (via SSH)' );
+		prodWpCliRes = await ensureWpCliOnSsh( {
+			sshHost: prodSsh.sshHost,
+			sshUser: prodSsh.sshUser,
+			sshPort: prodSsh.sshPort,
+		} );
+		if ( prodWpCliRes.action === 'installed' ) {
+			logger.success( `Remote WP-CLI installed at ${ prodWpCliRes.remotePath } (strategy: ${ prodWpCliRes.downloadStrategy })` );
+		} else if ( prodWpCliRes.action === 'already-present' ) {
+			logger.success( `Remote WP-CLI already present at ${ prodWpCliRes.remotePath } — skipping install` );
+		} else if ( prodWpCliRes.action === 'installed-no-path' ) {
+			logger.warn( `Remote WP-CLI installed but $HOME/bin is not on the non-interactive ssh PATH.\n${ prodWpCliRes.manualSnippet }` );
+		} else {
+			logger.warn( `Remote WP-CLI install failed:\n${ prodWpCliRes.manualSnippet }` );
+		}
+
 		logger.step( 'Installing WP plugin dependencies on PROD (via SSH)' );
 		const sshSpec = composeSshSpec( prodSsh );
 		prodDepResults = await ensurePlugins( { sshSpec, wpCliPharPath, ref: opts[ 'pin-deps' ] } );
@@ -544,6 +567,7 @@ export async function initCommand( opts ) {
 		`  mu-plugin (${ muMode })${ ' '.repeat( Math.max( 0, 12 - muMode.length ) ) }— ${ muRes.action }`,
 		`  WP plugin deps (local)   — ${ depResults ? depResults.results.map( r => r.slug + ':' + r.action ).join( ', ' ) : 'skipped' }`,
 		`  WP plugin deps (prod)    — ${ prodDepResults ? prodDepResults.results.map( r => r.slug + ':' + r.action ).join( ', ' ) : 'skipped' }`,
+		`  Remote WP-CLI (prod)     — ${ prodWpCliRes ? prodWpCliRes.action : 'skipped' }`,
 		`  mu-plugin (prod)         — ${ prodMuRes ? prodMuRes.action : 'skipped' }`,
 		sshKeyLine,
 		`  aif-wp-mcp skill         — ${ skillRes ? 'installed' : 'skipped' }`,
@@ -576,6 +600,14 @@ export async function initCommand( opts ) {
 	}
 	if ( prodDepResults?.manualSnippet ) {
 		hints.push( '  6. Finish manual prod plugin install (see commands printed above).' );
+	}
+	if ( prodWpCliRes?.action === 'installed-no-path' ) {
+		hints.push( '  7. Remote WP-CLI is installed at $HOME/bin/wp but $HOME/bin is not on' );
+		hints.push( '     the non-interactive ssh PATH (your hosting likely ignores ~/.bashrc for' );
+		hints.push( '     non-login shells). Add `export PATH="$HOME/bin:$PATH"` to a file your' );
+		hints.push( '     hosting reads during non-interactive ssh (often via control panel or' );
+		hints.push( '     ~/.ssh/environment with PermitUserEnvironment=yes), or invoke wp via' );
+		hints.push( '     the absolute path $HOME/bin/wp.' );
 	}
 	process.stdout.write( '\n' + hints.join( '\n' ) + '\n' );
 

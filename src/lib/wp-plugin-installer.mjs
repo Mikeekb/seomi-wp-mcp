@@ -234,7 +234,7 @@ export async function ensurePlugins( cfg ) {
 
 	if ( ! useWpCli ) {
 		const hint = sshSpec
-			? 'WP-CLI failed to connect over SSH. Verify --ssh spec, key auth, and that wp-cli is installed locally.'
+			? 'WP-CLI not reachable on the remote host. If init already ran ensureWpCliOnSsh, the failure is likely the non-interactive shell PATH not picking up $HOME/bin. See manual install snippet below.'
 			: 'WP-CLI not available locally — will fall back to zip download (no activation).';
 		logger.warn( `${ scopeLabel }: ${ hint }` );
 		if ( sshSpec ) {
