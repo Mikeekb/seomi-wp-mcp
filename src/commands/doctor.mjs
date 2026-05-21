@@ -19,6 +19,7 @@ import { logger } from '../lib/logger.mjs';
 import { readMcpJson } from '../lib/claude-mcp.mjs';
 import { ensurePlugins } from '../lib/wp-plugin-installer.mjs';
 import { detectAgentMdTargets } from '../lib/agent-md-target.mjs';
+import { probeRemoteWpCli, ensureWpCliOnSsh } from '../lib/ssh-wp-cli-installer.mjs';
 
 const MU_PLUGIN_HEADER = 'wp-content/mu-plugins/seomi-mcp-abilities/seomi-mcp-abilities.php';
 const MU_LOADER_FILE = 'wp-content/mu-plugins/mcp-abilities.php';
@@ -346,6 +347,7 @@ export async function doctorCommand( opts ) {
 	}
 
 	// 7. Prod SSH liveness — only when prod SSH is configured.
+	let prodSshOk = false;
 	if ( env?.WP_PROD_SSH_HOST && env.WP_PROD_SSH_USER ) {
 		const r = await sshLivenessProbe( {
 			host: env.WP_PROD_SSH_HOST,
@@ -353,12 +355,34 @@ export async function doctorCommand( opts ) {
 			port: env.WP_PROD_SSH_PORT,
 		} );
 		if ( r.ok ) {
+			prodSshOk = true;
 			report.pass( `Prod SSH reachable: ${ env.WP_PROD_SSH_USER }@${ env.WP_PROD_SSH_HOST } (passwordless)` );
 		} else {
 			const hint = r.error === 'wall-clock timeout'
 				? `SSH hung >${ SSH_PROBE_TIMEOUT_MS / 1000 }s — wrong host, firewalled, or interactive prompt`
 				: ( r.stderr.trim().split( /\r?\n/ ).pop() || `exit ${ r.code }` );
 			report.warn( `Prod SSH NOT reachable: ${ env.WP_PROD_SSH_USER }@${ env.WP_PROD_SSH_HOST }`, hint );
+		}
+	}
+
+	// 7.5. Prod WP-CLI on remote PATH. Probe only when SSH is up — otherwise
+	//      the probe would re-fail for the SSH reason already reported in #7.
+	//      We save the probe outcome so `--fix` doesn't have to re-run it.
+	let prodWpCliProbe = null;
+	if ( prodSshOk ) {
+		logger.debug( 'doctor: probing remote wp-cli presence' );
+		prodWpCliProbe = await probeRemoteWpCli( {
+			sshHost: env.WP_PROD_SSH_HOST,
+			sshUser: env.WP_PROD_SSH_USER,
+			sshPort: env.WP_PROD_SSH_PORT,
+		} );
+		if ( prodWpCliProbe.ok ) {
+			report.pass( `Prod WP-CLI installed at ${ prodWpCliProbe.remotePath }` );
+		} else {
+			report.warn(
+				'Prod WP-CLI not found in non-interactive ssh PATH',
+				'Run `seomi-wp-mcp doctor --fix` or `seomi-wp-mcp init` to install it.',
+			);
 		}
 	}
 
@@ -372,6 +396,20 @@ export async function doctorCommand( opts ) {
 		} );
 		for ( const item of r.results ) {
 			process.stdout.write( `  ${ item.slug }: ${ item.action }\n` );
+		}
+	}
+
+	// 8.5. --fix: install WP-CLI on prod when probe (#7.5) saw it missing.
+	if ( opts.fix && prodWpCliProbe && ! prodWpCliProbe.ok ) {
+		logger.step( 'Auto-fix: installing WP-CLI on prod' );
+		const wpcliFix = await ensureWpCliOnSsh( {
+			sshHost: env.WP_PROD_SSH_HOST,
+			sshUser: env.WP_PROD_SSH_USER,
+			sshPort: env.WP_PROD_SSH_PORT,
+		} );
+		process.stdout.write( `  remote wp-cli: ${ wpcliFix.action }\n` );
+		if ( wpcliFix.manualSnippet ) {
+			process.stdout.write( wpcliFix.manualSnippet + '\n' );
 		}
 	}
 
