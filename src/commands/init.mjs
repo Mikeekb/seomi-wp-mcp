@@ -35,6 +35,8 @@ import { ensurePlugins } from '../lib/wp-plugin-installer.mjs';
 import { ensureSshKey } from '../lib/ssh-key-setup.mjs';
 import { ensureMuPluginOnSsh } from '../lib/ssh-mu-plugin-installer.mjs';
 import { ensureWpCliOnSsh } from '../lib/ssh-wp-cli-installer.mjs';
+import { detectFullLocalWp } from '../lib/wp-local-detector.mjs';
+import { detectIdeaSshDeployment } from '../lib/idea-deployment-detector.mjs';
 
 const MU_PLUGIN_REPO_URL = 'https://github.com/Mikeekb/wp-mcp-abilities.git';
 const MU_PLUGIN_SLUG = 'seomi-mcp-abilities';
@@ -102,14 +104,25 @@ function detectWpRoot( cwd ) {
 	return null;
 }
 
-async function askCredentials() {
+async function askCredentials( cwd ) {
+	logger.debug( 'askCredentials: running env detectors' );
+	const localDetection = detectFullLocalWp( cwd );
+	const ideaDeploy = detectIdeaSshDeployment( cwd );
+	logger.debug( `askCredentials: localDetection.isFullLocalWp=${ localDetection.isFullLocalWp } ideaDeploy.found=${ ideaDeploy.found }` );
+
 	// First: does the user even have a local WP install?
 	// Common case where they don't: theme/plugin lives locally as a git repo,
 	// but the full WordPress instance only runs on a remote server.
-	const wantLocal = await confirm( {
-		message: 'Configure a LOCAL WordPress integration (you have wp-content/ locally and want to talk to it)?',
-		default: true,
-	} );
+	let wantLocal;
+	if ( localDetection.isFullLocalWp ) {
+		wantLocal = true;
+		logger.info( 'Detected full local WordPress (wp-admin/, wp-includes/, wp-config.php) — configuring LOCAL automatically.' );
+	} else {
+		wantLocal = await confirm( {
+			message: 'Configure a LOCAL WordPress integration (you have wp-content/ locally and want to talk to it)?',
+			default: true,
+		} );
+	}
 
 	let WP_LOCAL_URL, WP_LOCAL_USER, WP_LOCAL_APP_PASSWORD, WP_LOCAL_MCP_SERVER;
 	if ( wantLocal ) {
@@ -134,10 +147,18 @@ async function askCredentials() {
 	}
 
 	// If no local — prod is the only useful target, default to yes; otherwise default no.
-	const wantProd = await confirm( {
-		message: 'Configure PRODUCTION too?',
-		default: ! wantLocal,
-	} );
+	// When JetBrains SSH deploy config is detected, prod is unambiguous — skip the
+	// confirm. Same logic as the local-WP autodetect above.
+	let wantProd;
+	if ( ideaDeploy.found ) {
+		wantProd = true;
+		logger.info( `Detected JetBrains SSH deploy config at ${ ideaDeploy.source } — configuring PRODUCTION automatically.` );
+	} else {
+		wantProd = await confirm( {
+			message: 'Configure PRODUCTION too?',
+			default: ! wantLocal,
+		} );
+	}
 
 	let prod = {};
 	let prodSsh = null;
@@ -160,26 +181,34 @@ async function askCredentials() {
 			default: 'wordpress-prod',
 		} );
 
-		const wantSsh = await confirm( {
-			message: 'Configure SSH to prod (for the prod MCP server and remote plugin install)?',
-			default: true,
-		} );
+		let wantSsh;
+		if ( ideaDeploy.found ) {
+			wantSsh = true;
+			logger.info( 'Using SSH transport for prod (from .idea deploy config).' );
+		} else {
+			wantSsh = await confirm( {
+				message: 'Configure SSH to prod (for the prod MCP server and remote plugin install)?',
+				default: true,
+			} );
+		}
 		if ( wantSsh ) {
 			logger.step( 'SSH access to production' );
 			prod.WP_PROD_SSH_HOST = await input( {
 				message: 'Prod SSH host:',
+				default: ideaDeploy.host || undefined,
 				validate: ( v ) => !! v || 'Required',
 			} );
 			prod.WP_PROD_SSH_USER = await input( {
 				message: 'Prod SSH user:',
-				default: 'ai-agent',
+				default: ideaDeploy.user || 'ai-agent',
 			} );
 			prod.WP_PROD_SSH_PORT = await input( {
 				message: 'Prod SSH port (blank = default 22):',
-				default: '',
+				default: ideaDeploy.port || '',
 			} );
 			prod.WP_PROD_WP_ROOT = await input( {
 				message: 'Absolute WP root path on prod (e.g. /home/user/site/public_html):',
+				default: ideaDeploy.deployPath || undefined,
 				validate: ( v ) => v.startsWith( '/' ) || 'Must be an absolute path starting with /',
 			} );
 			prodSsh = {
@@ -294,7 +323,7 @@ export async function initCommand( opts ) {
 	const cwd = process.cwd();
 	logger.step( `seomi-wp-mcp init — cwd: ${ cwd }` );
 
-	const { env, wantLocal, prodSsh } = await askCredentials();
+	const { env, wantLocal, prodSsh } = await askCredentials( cwd );
 
 	// Optional SSH key wizard — set up passwordless auth to prod now so that
 	// subsequent steps (and future re-runs) don't hang waiting for a TTY
