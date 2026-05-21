@@ -44,7 +44,7 @@ That's ~30 minutes of error-prone manual work, repeated for every WP project. `s
 | `seomi-wp-mcp init`                  | Interactive first-time setup (see above)                               |
 | `seomi-wp-mcp update`                | Pull the latest mu-plugin and regenerate the managed block in `AGENTS.md`/`CLAUDE.md` |
 | `seomi-wp-mcp doctor`                | Diagnose env, mu-plugin presence, MCP server registration, plugin deps |
-| `seomi-wp-mcp doctor --fix`          | Auto-install/activate Abilities API + MCP Adapter if missing           |
+| `seomi-wp-mcp doctor --fix`          | Auto-install/activate Abilities API + MCP Adapter; install remote WP-CLI on prod if missing |
 | `seomi-wp-mcp --verbose <command>`   | Add debug-level logging to any command                                 |
 | `seomi-wp-mcp --version`             | Print version                                                          |
 
@@ -75,6 +75,30 @@ When SSH to prod is configured **and** you opt into the prod plugin install (`in
 3. Loader: `ssh ... 'cat > <wpRoot>/wp-content/mu-plugins/mcp-abilities.php'` with the 4-line PHP shim piped through stdin.
 
 If any step fails, `init` falls back to printing a copy-paste snippet with the exact remote commands and the PHP loader body. **Requirement:** `git` must be installed on the prod host (`apt install git` / `yum install git`). Before 0.1.12, prod-only setups had to install the mu-plugin manually after running `init`.
+
+### Production WP-CLI auto-install (0.1.16+)
+
+WP-CLI's `--ssh=` mode shells out to `ssh user@host wp <args>`, so the `wp` binary must be on the **remote** host's non-interactive PATH. Before 0.1.16, missing prod WP-CLI surfaced as `bash: line 1: wp: command not found` and aborted the whole prod plugin install — you had to ssh in, install wp-cli, edit `~/.bashrc`, and re-run `init`.
+
+Now `init` does this for you, right before the prod plugin install. Strategy chain (`src/lib/ssh-wp-cli-installer.mjs`):
+
+1. **Probe** — `ssh ... 'command -v wp || command -v wp-cli.phar'`. Found? short-circuit with `already-present`.
+2. **Tool probe** — one round-trip: `command -v php; command -v curl; command -v wget`. No php → bail with a clear error (php is mandatory to run the phar).
+3. **Download** — try `curl` → `wget` → local fetch + ssh stdin pipe. The last fallback works even when the prod host has no outbound HTTP, as long as the local machine can reach GitHub.
+4. **Wrapper** — write `$HOME/bin/wp` shell shim (`exec php "$HOME/bin/wp-cli.phar" "$@"`) via `ssh ... 'cat > $HOME/bin/wp'`.
+5. **PATH** — prepend `export PATH="$HOME/bin:$PATH"` to `~/.bashrc` and `~/.bash_profile` inside a `# >>> seomi-wp-mcp: PATH >>>` marker block. Inserted **at the top of the file**, before the stock `[ -z "$PS1" ] && return` early-return guard that ships in Debian/Ubuntu's `~/.bashrc` — otherwise non-interactive ssh skips the export. The marker block makes re-runs idempotent.
+6. **Verify** — `ssh -o BatchMode=yes ... 'wp --info'`. If that fails (e.g. shared hosting that ignores `~/.bashrc` for non-interactive ssh — common on cPanel/Plesk/Beget), retry as `"$HOME/bin/wp" --info`. Success there returns `action: installed-no-path` with a `manualSnippet` and a Next-step hint.
+
+Possible outcomes (shown in the init summary as `Remote WP-CLI (prod)`):
+
+| Action | Meaning |
+|--------|---------|
+| `already-present` | `wp` was on the remote PATH already — nothing changed. |
+| `installed` | Downloaded, wrapper written, PATH wired, `wp --info` works. |
+| `installed-no-path` | Phar + wrapper are in place, but the non-interactive ssh shell ignored `~/.bashrc`. Use `$HOME/bin/wp` explicitly, or wire PATH via the hosting control panel / `~/.ssh/environment`. See [docs/troubleshooting.md](./docs/troubleshooting.md). |
+| `failed` | A step before verify failed (probe error, no php, all download strategies broken). `manualSnippet` contains the exact commands to run by hand. |
+
+`seomi-wp-mcp doctor` adds a row `Prod WP-CLI installed at <path>` and `doctor --fix` runs the same `ensureWpCliOnSsh` flow on an existing setup without re-running `init`.
 
 ## Using with `ai-factory`
 
@@ -174,6 +198,12 @@ Proprietary — © SEOMI. See `LICENSE`.
 - [WordPress/abilities-api](https://github.com/WordPress/abilities-api) — runtime dependency.
 - [WordPress/mcp-adapter](https://github.com/WordPress/mcp-adapter) — runtime dependency.
 - [ai-factory](https://github.com/lee-to/ai-factory) — companion project for AI dev context.
+
+## Documentation
+
+| Guide | Description |
+|-------|-------------|
+| [Troubleshooting](./docs/troubleshooting.md) | Common failure modes (incl. WP-CLI PATH not picked up on shared hosting) and fixes |
 
 ---
 

@@ -44,7 +44,7 @@ seomi-wp-mcp init
 | `seomi-wp-mcp init`                  | Интерактивная первоначальная настройка (см. выше)                       |
 | `seomi-wp-mcp update`                | Подтягивает свежую версию mu-плагина и пересобирает managed-блок в `AGENTS.md`/`CLAUDE.md` |
 | `seomi-wp-mcp doctor`                | Диагностика: env, mu-плагин, регистрация MCP-сервера, плагины-зависимости |
-| `seomi-wp-mcp doctor --fix`          | Авто-починка: ставит/активирует Abilities API + MCP Adapter             |
+| `seomi-wp-mcp doctor --fix`          | Авто-починка: ставит/активирует Abilities API + MCP Adapter; ставит WP-CLI на прод, если его там нет |
 | `seomi-wp-mcp --verbose <command>`   | Включает debug-логи для любой команды                                   |
 | `seomi-wp-mcp --version`             | Показывает версию                                                        |
 
@@ -75,6 +75,30 @@ seomi-wp-mcp init
 3. Loader: `ssh ... 'cat > <wpRoot>/wp-content/mu-plugins/mcp-abilities.php'` — PHP-шим из 4 строк пишется через stdin.
 
 Если какой-то шаг падает — `init` печатает готовый сниппет с точными remote-командами и телом PHP-loader'а, и установку можно завершить руками. **Требование:** на проде должен быть установлен `git` (`apt install git` / `yum install git`). До 0.1.12 на prod-only setup-ах mu-плагин приходилось ставить вручную после `init`.
+
+### Авто-установка WP-CLI на прод (0.1.16+)
+
+Режим `--ssh=` у WP-CLI работает так: локальный `wp` запускает `ssh user@host wp <args>`, то есть бинарь `wp` должен быть в **non-interactive PATH удалённого хоста**. До 0.1.16 отсутствие wp-cli на проде вылезало как `bash: line 1: wp: command not found` и обрубало всю установку прод-плагинов — приходилось ssh-иться вручную, ставить wp-cli, править `~/.bashrc` и перезапускать `init`.
+
+Теперь `init` делает это сам прямо перед установкой прод-плагинов. Strategy chain (`src/lib/ssh-wp-cli-installer.mjs`):
+
+1. **Probe** — `ssh ... 'command -v wp || command -v wp-cli.phar'`. Нашли? Ранний выход с `already-present`.
+2. **Tool probe** — один round-trip: `command -v php; command -v curl; command -v wget`. Нет php → выход с понятной ошибкой (без php phar не запустится).
+3. **Download** — стратегии по порядку: `curl` → `wget` → локальный fetch + ssh stdin pipe. Последний фолбэк работает даже если у прод-хоста нет исходящего HTTP — лишь бы у локальной машины был доступ к GitHub.
+4. **Wrapper** — пишет shell-шим `$HOME/bin/wp` (`exec php "$HOME/bin/wp-cli.phar" "$@"`) через `ssh ... 'cat > $HOME/bin/wp'`.
+5. **PATH** — добавляет `export PATH="$HOME/bin:$PATH"` в `~/.bashrc` и `~/.bash_profile` внутри блока-маркера `# >>> seomi-wp-mcp: PATH >>>`. Вставляется **в начало файла**, до стандартного гарда `[ -z "$PS1" ] && return` из дефолтного дебиановского `~/.bashrc` — иначе non-interactive ssh пропустит export. Маркер делает повторные запуски идемпотентными.
+6. **Verify** — `ssh -o BatchMode=yes ... 'wp --info'`. Если падает (типично для шеред-хостингов уровня cPanel/Plesk/Beget, которые игнорируют `~/.bashrc` для non-interactive ssh), пробует `"$HOME/bin/wp" --info`. Успех на fallback возвращает `action: installed-no-path` с готовым `manualSnippet` и подсказкой в Next-steps.
+
+Возможные результаты (в init summary видны как `Remote WP-CLI (prod)`):
+
+| Action | Что значит |
+|--------|------------|
+| `already-present` | `wp` уже был в remote PATH — ничего не меняли. |
+| `installed` | Скачали, написали wrapper, прописали PATH, `wp --info` работает. |
+| `installed-no-path` | Phar + wrapper на месте, но non-interactive shell игнорит `~/.bashrc`. Используй `$HOME/bin/wp` напрямую, либо пропиши PATH через панель хостинга / `~/.ssh/environment`. См. [docs/troubleshooting.md](./docs/troubleshooting.md). |
+| `failed` | Упал какой-то шаг до verify (ssh error, нет php, все download-стратегии не сработали). В `manualSnippet` — точные команды для ручной установки. |
+
+`seomi-wp-mcp doctor` добавляет строку `Prod WP-CLI installed at <path>`, а `doctor --fix` прогоняет тот же `ensureWpCliOnSsh` flow на готовом setup-е без полного перезапуска `init`.
 
 ## Использование вместе с `ai-factory`
 
@@ -172,6 +196,12 @@ Proprietary — © SEOMI. См. `LICENSE`.
 - [WordPress/abilities-api](https://github.com/WordPress/abilities-api) — runtime-зависимость.
 - [WordPress/mcp-adapter](https://github.com/WordPress/mcp-adapter) — runtime-зависимость.
 - [ai-factory](https://github.com/lee-to/ai-factory) — спутник для AI-контекста разработки.
+
+## Документация
+
+| Раздел | Описание |
+|--------|----------|
+| [Troubleshooting](./docs/troubleshooting.md) | Типовые проблемы (в т.ч. WP-CLI не попал в PATH на шеред-хостинге) и способы починки |
 
 ---
 
