@@ -37,6 +37,7 @@ import { ensureMuPluginOnSsh } from '../lib/ssh-mu-plugin-installer.mjs';
 import { ensureWpCliOnSsh } from '../lib/ssh-wp-cli-installer.mjs';
 import { detectFullLocalWp } from '../lib/wp-local-detector.mjs';
 import { detectIdeaSshDeployment } from '../lib/idea-deployment-detector.mjs';
+import { detectThemeOrPluginSlug } from '../lib/project-asset-detector.mjs';
 
 const MU_PLUGIN_REPO_URL = 'https://github.com/Mikeekb/wp-mcp-abilities.git';
 const MU_PLUGIN_SLUG = 'seomi-mcp-abilities';
@@ -324,7 +325,8 @@ async function installAifSkill( cwd ) {
  */
 async function updateAgentMd( cwd, env, targets ) {
 	const templatePath = join( pkgRoot(), 'templates', 'claude-md-block.md' );
-	const block = await renderClaudeMdBlock( env, templatePath );
+	const assetSlug = detectThemeOrPluginSlug( cwd );
+	const block = await renderClaudeMdBlock( env, templatePath, { assetSlug } );
 	const results = [];
 	for ( const targetPath of targets ) {
 		const name = targetPath.split( /[\\/]/ ).pop();

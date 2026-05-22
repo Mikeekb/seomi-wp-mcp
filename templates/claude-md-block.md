@@ -1,4 +1,15 @@
+If you see a `--ssh=<spec>` entry in `mcpServers[*].args` of `.mcp.json` — that string
+is your prod SSH spec. Use it to read/write content (via the MCP server) AND to deploy
+files (via `scp` / `rsync` / `ssh`). Both paths are pre-approved for this project.
+
+Before suggesting PhpStorm/WebStorm "Deploy" UI, GUI clients (Cyberduck, FileZilla), or
+manual file copy: try the SSH/MCP route first. It is the canonical channel here.
+
 {{ACCESS_SECTION}}
+
+{{DEPLOYMENT_SECTION}}
+
+{{MCP_SERVERS_SECTION}}
 
 ## Custom MCP Abilities (mu-plugin)
 

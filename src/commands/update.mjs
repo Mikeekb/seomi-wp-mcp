@@ -16,6 +16,7 @@ import { logger } from '../lib/logger.mjs';
 import { insertOrUpdate as updateMarkerBlock } from '../lib/markers.mjs';
 import { renderClaudeMdBlock } from '../lib/claude-md-renderer.mjs';
 import { detectAgentMdTargets } from '../lib/agent-md-target.mjs';
+import { detectThemeOrPluginSlug } from '../lib/project-asset-detector.mjs';
 
 const MU_PLUGIN_DIR = 'wp-content/mu-plugins/seomi-mcp-abilities';
 const PLUGIN_HEADER_FILE = MU_PLUGIN_DIR + '/seomi-mcp-abilities.php';
@@ -127,7 +128,8 @@ export async function updateCommand( opts ) {
 	// if neither file exists, warn and skip; the user should run init first.
 	const env = await readEnv( cwd );
 	const templatePath = join( pkgRoot(), 'templates', 'claude-md-block.md' );
-	const block = await renderClaudeMdBlock( env, templatePath );
+	const assetSlug = detectThemeOrPluginSlug( cwd );
+	const block = await renderClaudeMdBlock( env, templatePath, { assetSlug } );
 	const detected = await detectAgentMdTargets( { cwd, interactive: false } );
 	const targets = detected.source === 'default' ? [] : detected.targets;
 
