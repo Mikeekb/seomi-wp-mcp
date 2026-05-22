@@ -366,6 +366,11 @@ function isPluginInstall( call ) {
 function isWpEval( call ) {
 	return wpArgs( call )[ 0 ] === 'eval';
 }
+function isSshTestF( call ) {
+	if ( call.cmd !== 'ssh' ) return false;
+	const a = call.args;
+	return a.includes( 'test' ) && a.includes( '-f' );
+}
 
 async function makeWpRoot( opts = {} ) {
 	const root = await mkdtemp( join( tmpdir(), 'seomi-wp-' ) );
@@ -445,8 +450,9 @@ test( 'ensurePlugins: skip release plugin when active and vendor present', async
 } );
 
 test( 'ensurePlugins: vendor check returning null preserves already-active behavior', async () => {
-	// SSH mode where wp eval fails (exit 1) → pluginVendorAutoloadExists returns null.
-	// In that case ensurePlugins must NOT attempt a forced reinstall.
+	// SSH mode where `ssh test -f` fails with a connection-level error (exit 255)
+	// → pluginVendorAutoloadExists returns null. In that case ensurePlugins must
+	// NOT attempt a forced reinstall.
 	const deps = [ { slug: 'mcp-adapter', githubRepo: 'WordPress/mcp-adapter', ref: 'trunk', useReleases: true, label: 'MCP Adapter' } ];
 	const { result } = await withStubFetch( [], () => withRouterExec(
 		( cmd, args ) => {
@@ -454,7 +460,8 @@ test( 'ensurePlugins: vendor check returning null preserves already-active behav
 			if ( isWpInfo( call ) ) return { code: 0, stdout: 'WP-CLI 2.12.0', stderr: '' };
 			if ( isCoreVersion( call ) ) return { code: 0, stdout: '6.5\n', stderr: '' };
 			if ( isIsActive( call, 'mcp-adapter' ) ) return { code: 0, stdout: '', stderr: '' };
-			if ( isWpEval( call ) ) return { code: 1, stdout: '', stderr: 'PHP fatal' };
+			if ( isSshTestF( call ) ) return { code: 255, stdout: '', stderr: 'Connection closed' };
+			if ( isWpEval( call ) ) throw new Error( 'wp eval must not be invoked under the new SSH probe' );
 			return { code: 0, stdout: '', stderr: '' };
 		},
 		() => ensurePlugins( { sshSpec: 'ai@host/var/www/wp', wpCliPharPath: 'C:/wp-cli/wp-cli.phar', deps } ),
@@ -464,7 +471,8 @@ test( 'ensurePlugins: vendor check returning null preserves already-active behav
 	const res = result.result;
 	const entry = res.results.find( ( r ) => r.slug === 'mcp-adapter' );
 	assert.equal( entry.action, 'already-active' );
-	assert.ok( stub.calls.some( ( c ) => isWpEval( c ) ), 'vendor check must attempt wp eval over SSH' );
+	assert.ok( stub.calls.some( ( c ) => isSshTestF( c ) ), 'vendor check must attempt ssh test -f over SSH' );
+	assert.ok( ! stub.calls.some( ( c ) => isWpEval( c ) ), 'must not call wp eval anymore' );
 	assert.ok( ! stub.calls.some( ( c ) => isPluginInstall( c ) ), 'forced reinstall must not run when vendor check is inconclusive' );
 } );
 
@@ -494,4 +502,81 @@ test( 'ensurePlugins: non-release-tracked active plugin skips vendor check entir
 	} finally {
 		await rm( wpRoot, { recursive: true, force: true } );
 	}
+} );
+
+/* -----------------------------------------------------------------------
+ * pluginVendorAutoloadExists SSH-probe tests.
+ *
+ * The SSH branch shells out to `ssh <host> test -f <abs-path>` (not `wp eval`,
+ * which was previously broken under wp-cli's --ssh transport because the inner
+ * double quotes around the PHP code were stripped by the remote bash wrapper).
+ * --------------------------------------------------------------------- */
+
+test( 'pluginVendorAutoloadExists: SSH test -f exit=0 → true', async () => {
+	const { result, stub } = await withStubExec(
+		{ code: 0, stdout: '', stderr: '' },
+		() => _internals.pluginVendorAutoloadExists(
+			{ sshSpec: 'user@host:2222/home/user/site/www' },
+			{ slug: 'mcp-adapter' },
+		),
+	);
+	assert.equal( result, true );
+	assert.equal( stub.calls.length, 1 );
+	const call = stub.calls[ 0 ];
+	assert.equal( call.cmd, 'ssh' );
+	assert.ok( call.args.includes( '-p' ) );
+	assert.ok( call.args.includes( '2222' ) );
+	assert.ok( call.args.includes( 'user@host' ) );
+	assert.ok( call.args.includes( 'test' ) );
+	assert.ok( call.args.includes( '-f' ) );
+	assert.ok( call.args.includes( '/home/user/site/www/wp-content/plugins/mcp-adapter/vendor/autoload.php' ) );
+	// Regression guard: must NOT shell out to `wp eval` / `file_exists(...)`.
+	assert.ok( ! call.args.some( ( a ) => /eval|file_exists/i.test( a ) ), 'must not call wp eval' );
+} );
+
+test( 'pluginVendorAutoloadExists: SSH test -f exit=1 → false', async () => {
+	const { result } = await withStubExec(
+		{ code: 1, stdout: '', stderr: '' },
+		() => _internals.pluginVendorAutoloadExists(
+			{ sshSpec: 'user@host/home/user/site/www' },
+			{ slug: 'mcp-adapter' },
+		),
+	);
+	assert.equal( result, false );
+} );
+
+test( 'pluginVendorAutoloadExists: SSH connection error (exit 255) → null', async () => {
+	const { result } = await withStubExec(
+		{ code: 255, stdout: '', stderr: 'Connection closed by host' },
+		() => _internals.pluginVendorAutoloadExists(
+			{ sshSpec: 'user@host/home/user/site/www' },
+			{ slug: 'mcp-adapter' },
+		),
+	);
+	assert.equal( result, null );
+} );
+
+test( 'pluginVendorAutoloadExists: SSH sshSpec without wpRoot → null (no exec call)', async () => {
+	const { result, stub } = await withStubExec(
+		{ code: 0, stdout: '', stderr: '' },
+		() => _internals.pluginVendorAutoloadExists(
+			{ sshSpec: 'user@host' },
+			{ slug: 'mcp-adapter' },
+		),
+	);
+	assert.equal( result, null );
+	assert.equal( stub.calls.length, 0, 'must not invoke ssh when wpRoot is unknown' );
+} );
+
+test( 'pluginVendorAutoloadExists: SSH port omitted → ssh called without -p', async () => {
+	const { stub } = await withStubExec(
+		{ code: 0, stdout: '', stderr: '' },
+		() => _internals.pluginVendorAutoloadExists(
+			{ sshSpec: 'user@host/home/user/site/www' },
+			{ slug: 'mcp-adapter' },
+		),
+	);
+	const call = stub.calls[ 0 ];
+	assert.ok( ! call.args.includes( '-p' ), 'no -p when port absent' );
+	assert.ok( call.args.includes( '-o' ) && call.args.includes( 'BatchMode=yes' ), 'BatchMode=yes must be set' );
 } );

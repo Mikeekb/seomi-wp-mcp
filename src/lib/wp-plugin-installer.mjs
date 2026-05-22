@@ -22,6 +22,7 @@ import { existsSync, createReadStream, createWriteStream } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { logger } from './logger.mjs';
+import { parseSshSpec } from './ssh-wp-cli-installer.mjs';
 
 export const DEFAULT_DEPS = [
 	{
@@ -162,23 +163,41 @@ async function wpCliIsActive( scope, slug ) {
  * reinstall from the release asset.
  *
  * Local mode (`scope.wpRoot`): synchronous `existsSync` against the WP root.
- * SSH mode  (`scope.sshSpec`): delegated to `wp eval` so the probe re-uses
- *                              the same wp-cli/ssh interactive-stdio plumbing
- *                              as the rest of this module (no raw ssh shell-out).
+ * SSH mode  (`scope.sshSpec`): direct `ssh <host> test -f <abs-path>`. Avoids
+ *                              `wp eval`, which is fragile under wp-cli's
+ *                              --ssh transport because inner double quotes
+ *                              in the PHP code get stripped by the bash
+ *                              wrapper around the remote command.
+ *                              Returns null on ssh connection/auth errors
+ *                              (any exit code other than 0 or 1) so callers
+ *                              do not force a reinstall on a transient
+ *                              network blip.
  */
 async function pluginVendorAutoloadExists( scope, dep ) {
 	const scopeLabel = scope.sshSpec ? `ssh:${ scope.sshSpec }` : scope.wpRoot || '<no-scope>';
 	if ( scope.sshSpec ) {
-		const php = `echo file_exists(WP_PLUGIN_DIR."/${ dep.slug }/vendor/autoload.php") ? "yes" : "no";`;
-		const r = await runWp( scope, [ 'eval', php ] );
-		if ( r.code !== 0 ) {
-			logger.debug( `vendor-check: ${ dep.slug } @ ${ scopeLabel } → null (wp eval exit=${ r.code })` );
+		const parsed = parseSshSpec( scope.sshSpec );
+		if ( ! parsed || ! parsed.sshHost || ! parsed.wpRoot ) {
+			logger.debug( `vendor-check: ${ dep.slug } @ ${ scopeLabel } → null (cannot parse sshSpec)` );
 			return null;
 		}
-		const out = ( r.stdout || '' ).trim();
-		const result = out === 'yes' ? true : ( out === 'no' ? false : null );
-		logger.debug( `vendor-check: ${ dep.slug } @ ${ scopeLabel } → ${ result } (stdout="${ out }")` );
-		return result;
+		const userHost = parsed.sshUser ? `${ parsed.sshUser }@${ parsed.sshHost }` : parsed.sshHost;
+		const remotePath = `${ parsed.wpRoot }/wp-content/plugins/${ dep.slug }/vendor/autoload.php`;
+		const args = [];
+		if ( parsed.sshPort ) args.push( '-p', parsed.sshPort );
+		args.push( '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=accept-new' );
+		args.push( userHost, 'test', '-f', remotePath );
+		const r = await _internals.exec( 'ssh', args );
+		if ( r.code === 0 ) {
+			logger.debug( `vendor-check: ${ dep.slug } @ ${ scopeLabel } → true (ssh test -f present)` );
+			return true;
+		}
+		if ( r.code === 1 ) {
+			logger.debug( `vendor-check: ${ dep.slug } @ ${ scopeLabel } → false (ssh test -f absent)` );
+			return false;
+		}
+		logger.debug( `vendor-check: ${ dep.slug } @ ${ scopeLabel } → null (ssh exit=${ r.code }, stderr="${ ( r.stderr || '' ).trim() }")` );
+		return null;
 	}
 	if ( scope.wpRoot ) {
 		const target = join( scope.wpRoot, 'wp-content', 'plugins', dep.slug, 'vendor', 'autoload.php' );
