@@ -254,17 +254,34 @@ async function connectMuPlugin( cwd, mode ) {
 
 	if ( mode === 'submodule' ) {
 		logger.step( `Adding git submodule: ${ MU_PLUGIN_REPO_URL } -> ${ MU_PLUGIN_DIR }` );
-		const r = await exec( 'git', [ 'submodule', 'add', MU_PLUGIN_REPO_URL, MU_PLUGIN_DIR ], { cwd } );
-		if ( r.code !== 0 ) {
-			logger.error( `git submodule add failed: ${ r.stderr.trim() }` );
-			return { strategy: 'submodule', action: 'failed', error: r.stderr };
+		const r = await _internals.exec( 'git', [ 'submodule', 'add', MU_PLUGIN_REPO_URL, MU_PLUGIN_DIR ], { cwd } );
+		if ( r.code === 0 ) {
+			return { strategy: 'submodule', action: 'added' };
 		}
-		return { strategy: 'submodule', action: 'added' };
+		// git submodule add refuses to add paths covered by .gitignore.
+		// Standard WP projects ignore wp-content/, which traps the recommended
+		// strategy. Detect the marker and fall back to plain clone (no submodule
+		// pointer, same payload as the 'copy' mode below).
+		const stderr = r.stderr || '';
+		if ( /ignored by .*\.gitignore/i.test( stderr ) ) {
+			logger.warn( `${ MU_PLUGIN_DIR } is ignored by .gitignore — submodule cannot be added; falling back to plain clone` );
+			logger.step( `Cloning mu-plugin directly: ${ MU_PLUGIN_REPO_URL } -> ${ MU_PLUGIN_DIR }` );
+			const c = await _internals.exec( 'git', [ 'clone', '--depth=1', MU_PLUGIN_REPO_URL, targetDir ], { cwd } );
+			if ( c.code !== 0 ) {
+				logger.error( `git clone fallback failed: ${ ( c.stderr || '' ).trim() }` );
+				return { strategy: 'submodule', action: 'failed', error: c.stderr, fallbackAttempted: 'copy' };
+			}
+			await _internals.exec( 'rm', [ '-rf', join( targetDir, '.git' ) ] );
+			logger.success( `mu-plugin cloned to ${ MU_PLUGIN_DIR } (submodule fallback)` );
+			return { strategy: 'submodule-fallback-copy', action: 'added', fallbackReason: 'gitignored' };
+		}
+		logger.error( `git submodule add failed: ${ stderr.trim() }` );
+		return { strategy: 'submodule', action: 'failed', error: stderr };
 	}
 
 	if ( mode === 'composer' ) {
 		logger.step( 'Installing via Composer' );
-		const r = await exec( 'composer', [ 'require', 'seomi/wp-mcp-abilities' ], { cwd } );
+		const r = await _internals.exec( 'composer', [ 'require', 'seomi/wp-mcp-abilities' ], { cwd } );
 		if ( r.code !== 0 ) {
 			logger.error( `composer require failed: ${ r.stderr.trim() }` );
 			return { strategy: 'composer', action: 'failed', error: r.stderr };
@@ -275,12 +292,12 @@ async function connectMuPlugin( cwd, mode ) {
 	if ( mode === 'copy' ) {
 		logger.step( `Downloading tarball + extracting into ${ MU_PLUGIN_DIR }` );
 		// Naive clone with --depth=1.
-		const r = await exec( 'git', [ 'clone', '--depth=1', MU_PLUGIN_REPO_URL, targetDir ] );
+		const r = await _internals.exec( 'git', [ 'clone', '--depth=1', MU_PLUGIN_REPO_URL, targetDir ] );
 		if ( r.code !== 0 ) {
 			logger.error( `git clone failed: ${ r.stderr.trim() }` );
 			return { strategy: 'copy', action: 'failed', error: r.stderr };
 		}
-		await exec( 'rm', [ '-rf', join( targetDir, '.git' ) ] );
+		await _internals.exec( 'rm', [ '-rf', join( targetDir, '.git' ) ] );
 		return { strategy: 'copy', action: 'added' };
 	}
 
@@ -643,3 +660,14 @@ export async function initCommand( opts ) {
 	logger.success( 'Done.' );
 	return 0;
 }
+
+export {
+	connectMuPlugin,
+	MU_PLUGIN_REPO_URL,
+	MU_PLUGIN_SLUG,
+	MU_PLUGIN_DIR,
+	MU_LOADER_FILE,
+	MU_PLUGIN_LOADER_PHP,
+};
+
+export const _internals = { exec };
