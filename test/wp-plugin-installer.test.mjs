@@ -1,6 +1,9 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
-import { _internals } from '../src/lib/wp-plugin-installer.mjs';
+import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { ensurePlugins, _internals } from '../src/lib/wp-plugin-installer.mjs';
 
 /**
  * These tests pin down the stdio contract introduced in fix(wp-plugin-installer):
@@ -295,4 +298,200 @@ test( 'resolvePluginZipUrl: refOverride bypasses release lookup', async () => {
 	assert.equal( calls.length, 0, 'refOverride must skip the release lookup' );
 	assert.equal( result.source, 'trunk' );
 	assert.equal( result.url, 'https://github.com/WordPress/mcp-adapter/archive/refs/heads/v0.3.0.zip' );
+} );
+
+/* -----------------------------------------------------------------------
+ * ensurePlugins vendor-check + forced reinstall tests.
+ *
+ * Covers the "active but vendor missing" recovery path: when a release-
+ * tracked plugin (useReleases:true) is already active but its
+ * vendor/autoload.php is missing — typically because it was previously
+ * installed from the trunk archive — ensurePlugins must force a reinstall
+ * from the release asset instead of short-circuiting on "already-active".
+ *
+ * Strategy:
+ *   - Local mode uses a real tmp WP root so pluginVendorAutoloadExists can
+ *     run its actual existsSync against a controlled filesystem.
+ *   - SSH mode stubs `wp eval` through _internals.exec to drive the null
+ *     branch.
+ *   - _internals.exec is stubbed with a router (cmd, args, opts) → response.
+ *   - globalThis.fetch is stubbed for release lookups via the existing
+ *     withStubFetch helper.
+ * --------------------------------------------------------------------- */
+
+function makeRouterExec( router ) {
+	const calls = [];
+	const fn = async ( cmd, args, opts = {} ) => {
+		calls.push( { cmd, args, opts } );
+		const out = await router( cmd, args, opts );
+		return out || { code: 0, stdout: '', stderr: '' };
+	};
+	fn.calls = calls;
+	return fn;
+}
+
+async function withRouterExec( router, run ) {
+	const original = _internals.exec;
+	_internals.exec = makeRouterExec( router );
+	try {
+		const result = await run( _internals.exec );
+		return { result, stub: _internals.exec };
+	} finally {
+		_internals.exec = original;
+	}
+}
+
+// runWp invokes exec('php', [phar, ...wpArgs, ...scopeFlags]) when
+// wpCliPharPath is set. Strip the phar prefix so the helpers below can
+// match the wp-cli arg shape regardless of how runWp shells out.
+function wpArgs( call ) {
+	if ( call.cmd === 'php' ) return call.args.slice( 1 );
+	return call.args;
+}
+function isWpInfo( call ) {
+	return wpArgs( call ).includes( '--info' );
+}
+function isCoreVersion( call ) {
+	const a = wpArgs( call );
+	return a[ 0 ] === 'core' && a[ 1 ] === 'version';
+}
+function isIsActive( call, slug ) {
+	const a = wpArgs( call );
+	return a[ 0 ] === 'plugin' && a[ 1 ] === 'is-active' && a[ 2 ] === slug;
+}
+function isPluginInstall( call ) {
+	const a = wpArgs( call );
+	return a[ 0 ] === 'plugin' && a[ 1 ] === 'install';
+}
+function isWpEval( call ) {
+	return wpArgs( call )[ 0 ] === 'eval';
+}
+
+async function makeWpRoot( opts = {} ) {
+	const root = await mkdtemp( join( tmpdir(), 'seomi-wp-' ) );
+	if ( opts.vendorFor ) {
+		for ( const slug of opts.vendorFor ) {
+			const dir = join( root, 'wp-content', 'plugins', slug, 'vendor' );
+			await mkdir( dir, { recursive: true } );
+			await writeFile( join( dir, 'autoload.php' ), '<?php // stub\n', 'utf8' );
+		}
+	}
+	return root;
+}
+
+const RELEASE_BODY = {
+	tag_name: 'v0.5.0',
+	assets: [
+		{ name: 'mcp-adapter.zip', browser_download_url: 'https://example/mcp-adapter-v0.5.0.zip' },
+	],
+};
+
+test( 'ensurePlugins: reinstall release plugin when active but vendor missing', async () => {
+	const wpRoot = await makeWpRoot(); // no vendor/ for mcp-adapter
+	try {
+		const deps = [ { slug: 'mcp-adapter', githubRepo: 'WordPress/mcp-adapter', ref: 'trunk', useReleases: true, label: 'MCP Adapter' } ];
+		const { result } = await withStubFetch( [ jsonResp( RELEASE_BODY ) ], () => withRouterExec(
+			( cmd, args ) => {
+				const call = { cmd, args };
+				if ( isWpInfo( call ) ) return { code: 0, stdout: 'WP-CLI 2.12.0', stderr: '' };
+				if ( isCoreVersion( call ) ) return { code: 0, stdout: '6.5\n', stderr: '' };
+				if ( isIsActive( call, 'mcp-adapter' ) ) return { code: 0, stdout: '', stderr: '' };
+				if ( isPluginInstall( call ) ) return { code: 0, stdout: 'Plugin installed.\n', stderr: '' };
+				return { code: 0, stdout: '', stderr: '' };
+			},
+			() => ensurePlugins( { wpRoot, wpCliPharPath: 'C:/wp-cli/wp-cli.phar', deps } ),
+		) );
+
+		const stub = result.stub;
+		const res = result.result;
+		const entry = res.results.find( ( r ) => r.slug === 'mcp-adapter' );
+		assert.equal( entry.action, 'reinstalled', 'must mark release-tracked plugin with missing vendor as reinstalled' );
+		assert.equal( entry.source, 'release' );
+		assert.equal( entry.reason, 'missing-vendor' );
+		const installCall = stub.calls.find( ( c ) => isPluginInstall( c ) );
+		assert.ok( installCall, 'wp plugin install must be invoked when vendor is missing' );
+		const installArgs = wpArgs( installCall );
+		assert.equal( installArgs[ 2 ], 'https://example/mcp-adapter-v0.5.0.zip' );
+		assert.ok( installArgs.includes( '--force' ), 'forced reinstall must pass --force' );
+	} finally {
+		await rm( wpRoot, { recursive: true, force: true } );
+	}
+} );
+
+test( 'ensurePlugins: skip release plugin when active and vendor present', async () => {
+	const wpRoot = await makeWpRoot( { vendorFor: [ 'mcp-adapter' ] } );
+	try {
+		const deps = [ { slug: 'mcp-adapter', githubRepo: 'WordPress/mcp-adapter', ref: 'trunk', useReleases: true, label: 'MCP Adapter' } ];
+		// fetch must NOT be invoked — release lookup is skipped when vendor is present.
+		const { result } = await withStubFetch( [], () => withRouterExec(
+			( cmd, args ) => {
+				const call = { cmd, args };
+				if ( isWpInfo( call ) ) return { code: 0, stdout: 'WP-CLI 2.12.0', stderr: '' };
+				if ( isCoreVersion( call ) ) return { code: 0, stdout: '6.5\n', stderr: '' };
+				if ( isIsActive( call, 'mcp-adapter' ) ) return { code: 0, stdout: '', stderr: '' };
+				return { code: 0, stdout: '', stderr: '' };
+			},
+			() => ensurePlugins( { wpRoot, wpCliPharPath: 'C:/wp-cli/wp-cli.phar', deps } ),
+		) );
+
+		const stub = result.stub;
+		const res = result.result;
+		const entry = res.results.find( ( r ) => r.slug === 'mcp-adapter' );
+		assert.equal( entry.action, 'already-active' );
+		assert.ok( ! stub.calls.some( ( c ) => isPluginInstall( c ) ), 'wp plugin install must NOT run when vendor is already present' );
+	} finally {
+		await rm( wpRoot, { recursive: true, force: true } );
+	}
+} );
+
+test( 'ensurePlugins: vendor check returning null preserves already-active behavior', async () => {
+	// SSH mode where wp eval fails (exit 1) → pluginVendorAutoloadExists returns null.
+	// In that case ensurePlugins must NOT attempt a forced reinstall.
+	const deps = [ { slug: 'mcp-adapter', githubRepo: 'WordPress/mcp-adapter', ref: 'trunk', useReleases: true, label: 'MCP Adapter' } ];
+	const { result } = await withStubFetch( [], () => withRouterExec(
+		( cmd, args ) => {
+			const call = { cmd, args };
+			if ( isWpInfo( call ) ) return { code: 0, stdout: 'WP-CLI 2.12.0', stderr: '' };
+			if ( isCoreVersion( call ) ) return { code: 0, stdout: '6.5\n', stderr: '' };
+			if ( isIsActive( call, 'mcp-adapter' ) ) return { code: 0, stdout: '', stderr: '' };
+			if ( isWpEval( call ) ) return { code: 1, stdout: '', stderr: 'PHP fatal' };
+			return { code: 0, stdout: '', stderr: '' };
+		},
+		() => ensurePlugins( { sshSpec: 'ai@host/var/www/wp', wpCliPharPath: 'C:/wp-cli/wp-cli.phar', deps } ),
+	) );
+
+	const stub = result.stub;
+	const res = result.result;
+	const entry = res.results.find( ( r ) => r.slug === 'mcp-adapter' );
+	assert.equal( entry.action, 'already-active' );
+	assert.ok( stub.calls.some( ( c ) => isWpEval( c ) ), 'vendor check must attempt wp eval over SSH' );
+	assert.ok( ! stub.calls.some( ( c ) => isPluginInstall( c ) ), 'forced reinstall must not run when vendor check is inconclusive' );
+} );
+
+test( 'ensurePlugins: non-release-tracked active plugin skips vendor check entirely', async () => {
+	const wpRoot = await makeWpRoot(); // no vendor anywhere
+	try {
+		// abilities-api has useReleases:false; even if vendor is missing, ensurePlugins must not probe it.
+		const deps = [ { slug: 'abilities-api', githubRepo: 'WordPress/abilities-api', ref: 'trunk', useReleases: false, label: 'WP Abilities API' } ];
+		const { result } = await withStubFetch( [], () => withRouterExec(
+			( cmd, args ) => {
+				const call = { cmd, args };
+				if ( isWpInfo( call ) ) return { code: 0, stdout: 'WP-CLI 2.12.0', stderr: '' };
+				if ( isCoreVersion( call ) ) return { code: 0, stdout: '6.5\n', stderr: '' };
+				if ( isIsActive( call, 'abilities-api' ) ) return { code: 0, stdout: '', stderr: '' };
+				if ( isWpEval( call ) ) throw new Error( 'wp eval must not be invoked for non-release-tracked plugins' );
+				return { code: 0, stdout: '', stderr: '' };
+			},
+			() => ensurePlugins( { wpRoot, wpCliPharPath: 'C:/wp-cli/wp-cli.phar', deps } ),
+		) );
+
+		const stub = result.stub;
+		const res = result.result;
+		const entry = res.results.find( ( r ) => r.slug === 'abilities-api' );
+		assert.equal( entry.action, 'already-active' );
+		assert.ok( ! stub.calls.some( ( c ) => isWpEval( c ) ), 'wp eval must not run for useReleases:false plugins' );
+		assert.ok( ! stub.calls.some( ( c ) => isPluginInstall( c ) ), 'plugin install must not run for already-active non-release-tracked plugins' );
+	} finally {
+		await rm( wpRoot, { recursive: true, force: true } );
+	}
 } );

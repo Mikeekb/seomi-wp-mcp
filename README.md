@@ -158,6 +158,7 @@ The default refs are the `trunk` branches of `WordPress/abilities-api` and `Word
 - The managed block in `AGENTS.md` / `CLAUDE.md` is wrapped in `<!-- seomi-wp-mcp:start --> ... <!-- seomi-wp-mcp:end -->` markers and is regenerated in place; everything outside the markers stays untouched. The CLI auto-detects which file the project uses (or both) — see `src/lib/agent-md-target.mjs`.
 - MCP server registration checks `claude mcp list` before `claude mcp add` — no duplicates.
 - `wp plugin is-active <slug>` is checked before install — no re-installs.
+- For release-tracked plugins (currently `mcp-adapter`), an active install whose `wp-content/plugins/<slug>/vendor/autoload.php` is missing — typically because an older version was installed from the trunk archive, which ships without `vendor/` — is force-reinstalled from the GitHub Releases asset. This clears the "Composer autoloader was not found" admin notice without manual intervention.
 
 Run `seomi-wp-mcp init` ten times in a row and the project state converges to the same thing.
 

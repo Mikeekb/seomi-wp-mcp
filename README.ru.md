@@ -156,6 +156,7 @@ npx skills add Mikeekb/seomi-wp-mcp
 - Managed-блок в `AGENTS.md` / `CLAUDE.md` обёрнут в маркеры `<!-- seomi-wp-mcp:start --> ... <!-- seomi-wp-mcp:end -->` и регенерируется внутри них; всё что вне маркеров — нетронуто. CLI автоматически определяет, какой файл использует проект (или оба) — см. `src/lib/agent-md-target.mjs`.
 - Регистрация MCP-серверов проверяет `claude mcp list` перед `claude mcp add` — дубликаты не появятся.
 - `wp plugin is-active <slug>` проверяется перед install — повторных установок нет.
+- Для release-tracked плагинов (сейчас это `mcp-adapter`) активная установка без `wp-content/plugins/<slug>/vendor/autoload.php` — например, когда более старая версия была поставлена из trunk-архива без `vendor/` — принудительно переустанавливается из release-asset GitHub. Admin-notice «Composer autoloader was not found» убирается без ручного вмешательства.
 
 Запускай `seomi-wp-mcp init` хоть десять раз подряд — состояние проекта стабильно сходится к одному и тому же.
 

@@ -147,6 +147,49 @@ async function wpCliIsActive( scope, slug ) {
 	return r.code === 0;
 }
 
+/**
+ * Probe whether `<wp-content>/plugins/<slug>/vendor/autoload.php` is present
+ * for the given dep on the target site.
+ *
+ * Resolves to:
+ *   - `true`:  file is present
+ *   - `false`: file is missing
+ *   - `null`:  could not determine (no scope, wp eval failed, unexpected output)
+ *
+ * Used by `ensurePlugins` to detect the "active but vendor missing" case for
+ * release-tracked plugins that were previously installed from the trunk
+ * archive (which ships without `vendor/`). On `false` the caller forces a
+ * reinstall from the release asset.
+ *
+ * Local mode (`scope.wpRoot`): synchronous `existsSync` against the WP root.
+ * SSH mode  (`scope.sshSpec`): delegated to `wp eval` so the probe re-uses
+ *                              the same wp-cli/ssh interactive-stdio plumbing
+ *                              as the rest of this module (no raw ssh shell-out).
+ */
+async function pluginVendorAutoloadExists( scope, dep ) {
+	const scopeLabel = scope.sshSpec ? `ssh:${ scope.sshSpec }` : scope.wpRoot || '<no-scope>';
+	if ( scope.sshSpec ) {
+		const php = `echo file_exists(WP_PLUGIN_DIR."/${ dep.slug }/vendor/autoload.php") ? "yes" : "no";`;
+		const r = await runWp( scope, [ 'eval', php ] );
+		if ( r.code !== 0 ) {
+			logger.debug( `vendor-check: ${ dep.slug } @ ${ scopeLabel } → null (wp eval exit=${ r.code })` );
+			return null;
+		}
+		const out = ( r.stdout || '' ).trim();
+		const result = out === 'yes' ? true : ( out === 'no' ? false : null );
+		logger.debug( `vendor-check: ${ dep.slug } @ ${ scopeLabel } → ${ result } (stdout="${ out }")` );
+		return result;
+	}
+	if ( scope.wpRoot ) {
+		const target = join( scope.wpRoot, 'wp-content', 'plugins', dep.slug, 'vendor', 'autoload.php' );
+		const result = existsSync( target );
+		logger.debug( `vendor-check: ${ dep.slug } @ ${ scopeLabel } → ${ result } (${ target })` );
+		return result;
+	}
+	logger.debug( `vendor-check: ${ dep.slug } @ ${ scopeLabel } → null (no scope.wpRoot/sshSpec)` );
+	return null;
+}
+
 async function wpCliInstall( scope, source ) {
 	logger.info( `wp-cli: installing ${ source }` );
 	const r = await runWp( scope, [ 'plugin', 'install', source, '--activate', '--force' ] );
@@ -373,6 +416,28 @@ export async function ensurePlugins( cfg ) {
 		if ( useWpCli ) {
 			const active = await wpCliIsActive( scope, dep.slug );
 			if ( active ) {
+				// For release-tracked plugins, "active" is not enough: a previous
+				// install from the trunk archive ships without vendor/, so the
+				// plugin loads but fatals on its Composer autoloader. Probe the
+				// vendor dir and force a reinstall from the release asset when
+				// missing — wpCliInstall already passes --force.
+				if ( dep.useReleases === true ) {
+					const hasVendor = await pluginVendorAutoloadExists( scope, dep );
+					if ( hasVendor === false ) {
+						logger.warn( `${ dep.slug }: active but vendor/autoload.php missing — forcing reinstall from release asset` );
+						const { url: zip, source } = await resolvePluginZipUrl( dep, { refOverride } );
+						const ok = await wpCliInstall( scope, zip );
+						if ( ok ) {
+							logger.success( `${ dep.slug } reinstalled from release asset (source: ${ source })` );
+							results.push( { slug: dep.slug, action: 'reinstalled', strategy: sshSpec ? 'wp-cli-ssh' : 'wp-cli', source, reason: 'missing-vendor' } );
+							continue;
+						}
+						logger.warn( `${ dep.slug }: forced reinstall failed — see WP-CLI stderr above` );
+						results.push( { slug: dep.slug, action: 'failed', error: 'forced reinstall failed', reason: 'missing-vendor' } );
+						continue;
+					}
+					logger.debug( `${ dep.slug }: vendor check returned ${ hasVendor } — keeping active` );
+				}
 				logger.success( `${ dep.slug } already active — skipping` );
 				results.push( { slug: dep.slug, action: 'already-active' } );
 				continue;
@@ -511,4 +576,4 @@ async function maybeRunComposerInstall( pluginDir ) {
 	return { ran: true, ok: true };
 }
 
-export const _internals = { buildZipUrl, buildManualSnippet, exec, runWp, resolveReleaseZipUrl, resolvePluginZipUrl };
+export const _internals = { buildZipUrl, buildManualSnippet, exec, runWp, resolveReleaseZipUrl, resolvePluginZipUrl, pluginVendorAutoloadExists };
