@@ -19,6 +19,7 @@ That single `init` will:
 5. Drop the `aif-wp-mcp` skill into `.claude/skills/` so future `/aif`-style sessions see it.
 6. Insert a managed block into the project's main agent-instructions file (`AGENTS.md` or `CLAUDE.md`) between `<!-- seomi-wp-mcp:start -->` markers — detected automatically; if both files exist, the block is kept in sync in both. If neither exists, `init` asks which to create (default: `AGENTS.md`, the universal standard).
 7. Write **project-scope** MCP server entries to `.mcp.json` in the project root (so each project sees its own `wordpress-local`/`wordpress-prod`, no cross-project leakage). Local server uses stdio via WP-CLI `mcp-adapter serve`; prod uses the same transport but with WP-CLI `--ssh=` so commands run on the production server.
+8. Embed **deploy-over-SSH recipes** in the managed `AGENTS.md`/`CLAUDE.md` block — concrete `scp`/`rsync`/`ssh` commands prefilled with the actual host, port, WP root, and detected theme/plugin slug — so AI agents reach for the SSH channel before suggesting PhpStorm UI deploy. Includes a "MCP servers in this project" section that lists project-scope vs user-scope servers and a short playbook for adding a new MCP server (`claude mcp add ... --scope project|user`).
 
 Re-run any time — it's **idempotent**. Nothing duplicates, nothing gets clobbered.
 
