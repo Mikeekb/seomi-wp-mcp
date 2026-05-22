@@ -77,6 +77,80 @@ The generated CLAUDE.md managed block (between `seomi-wp-mcp:start` / `:end`) al
 includes a "Credentials & remote access" section with concrete `ssh` / `wp --ssh=...`
 examples derived from these exact env values; use those examples verbatim.
 
+### Deploy to production (SSH)
+
+Triggers (Russian and English):
+"залей на прод", "задеплой тему", "обнови файл на проде", "deploy theme to prod",
+"push theme to production", "scp the theme", "rsync to prod".
+
+**First action:** read `.claude/.env` for `WP_PROD_SSH_*` and `WP_PROD_WP_ROOT`. If
+`WP_PROD_SSH_HOST` is present, the SSH channel is configured — **use it**. The same
+`--ssh=<spec>` that the prod MCP server uses in `.mcp.json` is a regular SSH spec, so
+`scp` / `rsync` / `ssh` to that host work without any extra setup.
+
+**Then:** use the `scp` / `rsync` / `ssh` examples from the managed CLAUDE.md block
+(under `### Deployment to production (SCP/SSH)`). The CLI generates them from
+`.claude/.env` values, including the actual theme/plugin slug for this project.
+
+**Do NOT propose** PhpStorm/WebStorm "Deploy" UI, Cyberduck, FileZilla, or any GUI
+client as the *first* option for file pushes. PhpStorm UI is acceptable only when the
+user explicitly asks for it. AI sessions cannot drive GUI clients reliably, and the SSH
+channel is faster and scriptable.
+
+**Hard rule:** if `WP_PROD_SSH_HOST` exists in `.claude/.env`, the SSH channel is
+considered working. If `ssh` itself fails (key not installed, host unreachable), run
+the SSH key wizard (`seomi-wp-mcp init` → SSH key step) **before** suggesting a GUI
+client. Don't silently fall back to "use PhpStorm" — that's how the eltonn.ru deploy
+flow went sideways before this guidance existed.
+
+### MCP scope: global vs project
+
+This CLI installs **project-scope** MCP servers (`wordpress-local`, `wordpress-prod`)
+into `.mcp.json` at the project root. Project-scope means:
+
+- File: `.mcp.json` in the repo root (tracked in git, visible to everyone who clones).
+- Visibility: only this WP project sees them.
+- Source of truth: this CLI manages them; do not hand-edit unless removing.
+
+**User-scope** MCP servers live in `~/.claude.json` and are personal to the developer:
+
+- File: `~/.claude.json` (not in any repo).
+- Visibility: every project this user opens.
+- Inspect: `claude mcp list --scope user`.
+- Source of truth: hand-managed by the user with `claude mcp add ... --scope user`.
+
+**Hard rule:** if a new MCP server is relevant **only to this WP project** (e.g. a custom
+WordPress plugin's MCP transport, a project-specific PageSpeed key) → add it `--scope
+project`. If it's useful in every project the user opens (e.g. global Sentry, global
+filesystem) → `--scope user`. Don't push `.mcp.json` entries that depend on a personal
+absolute path (`/Users/<me>/...`) — that breaks for everyone else who clones.
+
+### Adding a new MCP server (proactive)
+
+Triggers: the task needs a capability that isn't in `seomi/*` abilities AND doesn't fit
+as a mu-plugin module (e.g. PageSpeed API, Sentry queries, external templating, Notion
+integration, a third-party headless CMS). When the agent notices "I keep hitting a
+missing-data-source pattern and the user would benefit from a permanent MCP server" —
+propose adding one, don't hack a one-off workaround.
+
+**Playbook (mirrors "Adding a new ability" but for MCP servers):**
+
+1. **Pause and announce.** One short message before adding anything: proposed server
+   name, transport (`stdio` / `sse`), scope (`project` / `user`), source package
+   (`npx <package>`, github URL, or local binary path).
+2. **Decide scope.** Project-only → `--scope project`. Cross-project → `--scope user`.
+   When in doubt, ask the user.
+3. **Wait for user OK.**
+4. **Add:** `claude mcp add <name> --scope <scope> --transport stdio -- <command> <args...>`.
+5. **Restart Claude Code** in this directory so the new server is loaded.
+6. **Commit `.mcp.json`** if `--scope project` (the file is tracked).
+
+**Anti-patterns:**
+- ❌ Adding a project-only server to `--scope user` (clutters every project).
+- ❌ Committing `.mcp.json` with absolute paths that only exist on one machine.
+- ❌ Adding a server silently without telling the user — every new MCP server is a
+  capability change that affects every future session.
+
 ### SSH key wizard
 
 `init` offers an optional **SSH key wizard** before any wp-cli-over-SSH calls when the
