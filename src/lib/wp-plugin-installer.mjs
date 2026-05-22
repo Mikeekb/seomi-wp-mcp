@@ -28,12 +28,14 @@ export const DEFAULT_DEPS = [
 		slug: 'abilities-api',
 		githubRepo: 'WordPress/abilities-api',
 		ref: 'trunk',
+		useReleases: false,
 		label: 'WP Abilities API',
 	},
 	{
 		slug: 'mcp-adapter',
 		githubRepo: 'WordPress/mcp-adapter',
 		ref: 'trunk',
+		useReleases: true,
 		label: 'MCP Adapter',
 	},
 ];
@@ -180,14 +182,123 @@ function buildZipUrl( spec ) {
 	return `https://github.com/${ spec.githubRepo }/archive/refs/heads/${ ref }.zip`;
 }
 
+/**
+ * Resolve the latest GitHub Release asset URL for a plugin spec.
+ *
+ * GitHub source archives (`archive/refs/heads/<ref>.zip`) ship without the
+ * Composer-vendored dependencies (`vendor/` is gitignored by most plugins).
+ * Release assets are typically built distributions that include `vendor/`,
+ * which is what production WP sites need.
+ *
+ * Best-effort: any failure (404, 403 rate-limit, network, abort, bad JSON,
+ * no usable asset) resolves to `null` so the caller can fall back to the
+ * trunk URL. The function never throws.
+ *
+ * Filtering: picks the first asset whose `name` ends with `.zip` and does
+ * NOT contain `-src` or `-source` substrings (those are source-only mirrors
+ * of the GitHub archive and would defeat the whole point of release resolve).
+ *
+ * Timeout: 5 seconds via AbortController so a slow GitHub does not hang
+ * `init`/`doctor` runs.
+ *
+ * @param {{ githubRepo: string, slug?: string }} spec
+ * @returns {Promise<string|null>}
+ */
+async function resolveReleaseZipUrl( spec ) {
+	const apiUrl = `https://api.github.com/repos/${ spec.githubRepo }/releases/latest`;
+	logger.debug( `release-resolver: GET ${ apiUrl }` );
+
+	const controller = new AbortController();
+	const timeout = setTimeout( () => controller.abort(), 5000 );
+	try {
+		const resp = await fetch( apiUrl, {
+			signal: controller.signal,
+			headers: {
+				Accept: 'application/vnd.github+json',
+				'User-Agent': 'seomi-wp-mcp',
+			},
+		} );
+		if ( ! resp.ok ) {
+			logger.debug( `release-resolver: ${ spec.githubRepo } no usable release asset (HTTP ${ resp.status })` );
+			return null;
+		}
+		const body = await resp.json();
+		const assets = Array.isArray( body?.assets ) ? body.assets : [];
+		const asset = assets.find( ( a ) => {
+			const name = String( a?.name || '' );
+			if ( ! name.toLowerCase().endsWith( '.zip' ) ) return false;
+			if ( /-src(\.|-)/i.test( name ) || /-source(\.|-)/i.test( name ) ) return false;
+			return true;
+		} );
+		if ( ! asset?.browser_download_url ) {
+			logger.debug( `release-resolver: ${ spec.githubRepo } no usable release asset (no matching zip in ${ assets.length } assets)` );
+			return null;
+		}
+		logger.debug( `release-resolver: ${ spec.githubRepo } latest tag=${ body?.tag_name || '?' }, asset=${ asset.name }, url=${ asset.browser_download_url }` );
+		return asset.browser_download_url;
+	} catch ( err ) {
+		logger.debug( `release-resolver: ${ spec.githubRepo } no usable release asset (${ err.name }: ${ err.message })` );
+		return null;
+	} finally {
+		clearTimeout( timeout );
+	}
+}
+
+/**
+ * Choose the install URL for a plugin spec, with graceful trunk fallback.
+ *
+ * Priority:
+ *   1. `opts.refOverride` set (CLI `--pin-deps=<ref>`)
+ *      → ALWAYS trunk URL with that ref. Release lookup is skipped.
+ *   2. `spec.useReleases !== true`
+ *      → trunk URL via `buildZipUrl(spec)`. No release lookup, no logs.
+ *   3. `spec.useReleases === true`
+ *      → try `resolveReleaseZipUrl(spec)`.
+ *      → on success: { url, source: 'release' }.
+ *      → on null (any failure): WARN + trunk fallback { url, source: 'trunk' }.
+ *
+ * @param {Object} spec
+ * @param {{ refOverride?: string|null }} [opts]
+ * @returns {Promise<{ url: string, source: 'release' | 'trunk' }>}
+ */
+async function resolvePluginZipUrl( spec, opts = {} ) {
+	const refOverride = opts.refOverride || null;
+	if ( refOverride ) {
+		logger.info( `Pinned ${ spec.slug } to ${ refOverride } — skipping release lookup` );
+		return { url: buildZipUrl( { ...spec, ref: refOverride } ), source: 'trunk' };
+	}
+	if ( spec.useReleases !== true ) {
+		return { url: buildZipUrl( spec ), source: 'trunk' };
+	}
+	const releaseUrl = await resolveReleaseZipUrl( spec );
+	if ( releaseUrl ) {
+		logger.info( `${ spec.slug }: using release asset ${ releaseUrl }` );
+		return { url: releaseUrl, source: 'release' };
+	}
+	logger.warn( `${ spec.slug }: release not available — falling back to trunk.zip (vendor/ may be missing; manual composer install may be required)` );
+	return { url: buildZipUrl( spec ), source: 'trunk' };
+}
+
 function buildManualSnippet( deps, wpRoot, sshSpec ) {
 	const scopeFlag = sshSpec ? ` --ssh=${ sshSpec }` : ( wpRoot ? ` --path=${ wpRoot }` : '' );
 	const lines = [];
 	lines.push( '# Manual install of WordPress plugin dependencies:' );
+	let anyReleaseTracked = false;
 	for ( const dep of deps ) {
-		const zip = buildZipUrl( dep );
+		// For release-tracked plugins, point the user at GitHub's stable
+		// `/releases/latest/download/<slug>.zip` URL — it serves the built
+		// asset with bundled `vendor/`, which is what the plugin needs to
+		// run. The trunk archive (used otherwise) ships without vendor/.
+		const zip = dep.useReleases
+			? `https://github.com/${ dep.githubRepo }/releases/latest/download/${ dep.slug }.zip`
+			: buildZipUrl( dep );
+		if ( dep.useReleases ) anyReleaseTracked = true;
 		lines.push( `# ${ dep.label } (${ dep.slug })` );
 		lines.push( `wp plugin install ${ zip } --activate --force${ scopeFlag }` );
+	}
+	if ( anyReleaseTracked ) {
+		lines.push( '# If a release URL above 404s (asset name changed), open' );
+		lines.push( '# https://github.com/<repo>/releases and copy the latest .zip asset URL manually.' );
 	}
 	return lines.join( '\n' );
 }
@@ -216,7 +327,13 @@ export async function ensurePlugins( cfg ) {
 	const wpCliPharPath = cfg.wpCliPharPath;
 	const scope = { wpRoot, sshSpec, wpCliPharPath };
 	const scopeLabel = sshSpec ? `ssh:${ sshSpec }` : wpRoot;
-	const deps = ( cfg.deps || DEFAULT_DEPS ).map( ( d ) => ( cfg.ref ? { ...d, ref: cfg.ref } : d ) );
+	// `cfg.ref` is the --pin-deps override. We keep it as a separate refOverride
+	// instead of mutating each dep's `ref`, because resolvePluginZipUrl needs to
+	// know whether a user-specified pin is in effect (in which case release
+	// lookup is skipped) vs the spec's own default `ref` (which is only used in
+	// the trunk fallback).
+	const refOverride = cfg.ref || null;
+	const deps = cfg.deps || DEFAULT_DEPS;
 	const results = [];
 
 	const useWpCli = await wpCliAvailable( scope );
@@ -260,11 +377,11 @@ export async function ensurePlugins( cfg ) {
 				results.push( { slug: dep.slug, action: 'already-active' } );
 				continue;
 			}
-			const zip = buildZipUrl( dep );
+			const { url: zip, source } = await resolvePluginZipUrl( dep, { refOverride } );
 			const ok = await wpCliInstall( scope, zip );
 			if ( ok ) {
-				logger.success( `${ dep.slug } installed and activated via WP-CLI` );
-				results.push( { slug: dep.slug, action: 'installed', strategy: sshSpec ? 'wp-cli-ssh' : 'wp-cli' } );
+				logger.success( `${ dep.slug } installed and activated via WP-CLI (source: ${ source })` );
+				results.push( { slug: dep.slug, action: 'installed', strategy: sshSpec ? 'wp-cli-ssh' : 'wp-cli', source } );
 				continue;
 			}
 			logger.warn( `WP-CLI install failed for ${ dep.slug } — falling back to zip download` );
@@ -283,7 +400,7 @@ export async function ensurePlugins( cfg ) {
 		}
 
 		try {
-			const zipUrl = buildZipUrl( dep );
+			const { url: zipUrl, source } = await resolvePluginZipUrl( dep, { refOverride } );
 			const tmpZip = join( tmpdir(), `seomi-wp-mcp-${ dep.slug }-${ Date.now() }.zip` );
 			await downloadZip( zipUrl, tmpZip );
 			await mkdir( pluginsDir, { recursive: true } );
@@ -304,15 +421,15 @@ export async function ensurePlugins( cfg ) {
 			if ( useWpCli ) {
 				const activated = await wpCliActivate( scope, dep.slug );
 				if ( activated ) {
-					logger.success( `${ dep.slug } extracted + activated via WP-CLI` );
-					results.push( { slug: dep.slug, action: 'installed', strategy: 'zip+wp-cli-activate' } );
+					logger.success( `${ dep.slug } extracted + activated via WP-CLI (source: ${ source })` );
+					results.push( { slug: dep.slug, action: 'installed', strategy: 'zip+wp-cli-activate', source } );
 					continue;
 				}
 				logger.warn( `${ dep.slug } extracted but WP-CLI activate failed — activate manually from WP admin` );
 			} else {
-				logger.success( `${ dep.slug } extracted to ${ targetDir } — activate from WP admin (no WP-CLI available)` );
+				logger.success( `${ dep.slug } extracted to ${ targetDir } — activate from WP admin (no WP-CLI available; source: ${ source })` );
 			}
-			results.push( { slug: dep.slug, action: 'extracted', strategy: 'zip-download', needsManualActivation: true } );
+			results.push( { slug: dep.slug, action: 'extracted', strategy: 'zip-download', source, needsManualActivation: true } );
 		} catch ( err ) {
 			logger.error( `Failed to install ${ dep.slug }: ${ err.message }` );
 			results.push( { slug: dep.slug, action: 'failed', error: err.message } );
@@ -394,4 +511,4 @@ async function maybeRunComposerInstall( pluginDir ) {
 	return { ran: true, ok: true };
 }
 
-export const _internals = { buildZipUrl, buildManualSnippet, exec, runWp };
+export const _internals = { buildZipUrl, buildManualSnippet, exec, runWp, resolveReleaseZipUrl, resolvePluginZipUrl };

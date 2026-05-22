@@ -97,3 +97,202 @@ test( 'exec strips the interactive flag before spawning (no leakage as spawn opt
 	assert.equal( r.code, 0 );
 	assert.equal( r.stdout, 'hello' );
 } );
+
+/* -----------------------------------------------------------------------
+ * Release-resolver tests.
+ *
+ * resolveReleaseZipUrl hits api.github.com to pick a built release asset
+ * (whose archive includes vendor/) instead of the source-only trunk.zip
+ * that GitHub serves from /archive/refs/heads/. resolvePluginZipUrl wraps
+ * that lookup with policy: pin-deps override > useReleases:false > release
+ * lookup with trunk fallback on failure.
+ *
+ * Tests stub globalThis.fetch so they never touch the network.
+ * --------------------------------------------------------------------- */
+
+function jsonResp( body, status = 200 ) {
+	return {
+		ok: status >= 200 && status < 300,
+		status,
+		json: async () => body,
+	};
+}
+
+async function withStubFetch( responses, run ) {
+	const original = globalThis.fetch;
+	const calls = [];
+	const queue = [ ...responses ];
+	globalThis.fetch = async ( url, init ) => {
+		calls.push( { url, init } );
+		if ( ! queue.length ) {
+			throw new Error( `unexpected fetch: ${ url }` );
+		}
+		const next = queue.shift();
+		if ( typeof next === 'function' ) {
+			return next( { url, init } );
+		}
+		return next;
+	};
+	try {
+		const result = await run();
+		return { result, calls };
+	} finally {
+		globalThis.fetch = original;
+	}
+}
+
+test( 'resolveReleaseZipUrl: returns first .zip asset URL on success', async () => {
+	const spec = { slug: 'mcp-adapter', githubRepo: 'WordPress/mcp-adapter' };
+	const body = {
+		tag_name: 'v0.4.0',
+		assets: [
+			{ name: 'mcp-adapter.zip', browser_download_url: 'https://example/mcp-adapter.zip' },
+		],
+	};
+	const { result, calls } = await withStubFetch(
+		[ jsonResp( body ) ],
+		() => _internals.resolveReleaseZipUrl( spec ),
+	);
+	assert.equal( result, 'https://example/mcp-adapter.zip' );
+	assert.equal( calls.length, 1 );
+	assert.match( calls[ 0 ].url, /api\.github\.com\/repos\/WordPress\/mcp-adapter\/releases\/latest$/ );
+	assert.equal( calls[ 0 ].init.headers[ 'User-Agent' ], 'seomi-wp-mcp' );
+} );
+
+test( 'resolveReleaseZipUrl: returns null on 404 (no releases yet)', async () => {
+	const { result } = await withStubFetch(
+		[ jsonResp( {}, 404 ) ],
+		() => _internals.resolveReleaseZipUrl( { githubRepo: 'WordPress/mcp-adapter' } ),
+	);
+	assert.equal( result, null );
+} );
+
+test( 'resolveReleaseZipUrl: returns null on 403 (rate-limit)', async () => {
+	const { result } = await withStubFetch(
+		[ jsonResp( { message: 'API rate limit exceeded' }, 403 ) ],
+		() => _internals.resolveReleaseZipUrl( { githubRepo: 'WordPress/mcp-adapter' } ),
+	);
+	assert.equal( result, null );
+} );
+
+test( 'resolveReleaseZipUrl: returns null when release has no zip asset', async () => {
+	const body = {
+		tag_name: 'v0.4.0',
+		assets: [ { name: 'CHANGELOG.txt', browser_download_url: 'https://example/CHANGELOG.txt' } ],
+	};
+	const { result } = await withStubFetch(
+		[ jsonResp( body ) ],
+		() => _internals.resolveReleaseZipUrl( { githubRepo: 'WordPress/mcp-adapter' } ),
+	);
+	assert.equal( result, null );
+} );
+
+test( 'resolveReleaseZipUrl: picks the first usable .zip when multiple assets exist', async () => {
+	const body = {
+		tag_name: 'v0.4.0',
+		assets: [
+			{ name: 'CHANGELOG.txt', browser_download_url: 'https://example/CHANGELOG.txt' },
+			{ name: 'mcp-adapter.zip', browser_download_url: 'https://example/mcp-adapter.zip' },
+		],
+	};
+	const { result } = await withStubFetch(
+		[ jsonResp( body ) ],
+		() => _internals.resolveReleaseZipUrl( { githubRepo: 'WordPress/mcp-adapter' } ),
+	);
+	assert.equal( result, 'https://example/mcp-adapter.zip' );
+} );
+
+test( 'resolveReleaseZipUrl: filters out -src/-source mirror archives', async () => {
+	const body = {
+		tag_name: 'v0.4.0',
+		assets: [
+			{ name: 'mcp-adapter-src.zip', browser_download_url: 'https://example/src.zip' },
+			{ name: 'mcp-adapter-source.zip', browser_download_url: 'https://example/source.zip' },
+			{ name: 'mcp-adapter.zip', browser_download_url: 'https://example/built.zip' },
+		],
+	};
+	const { result } = await withStubFetch(
+		[ jsonResp( body ) ],
+		() => _internals.resolveReleaseZipUrl( { githubRepo: 'WordPress/mcp-adapter' } ),
+	);
+	assert.equal( result, 'https://example/built.zip' );
+} );
+
+test( 'resolveReleaseZipUrl: returns null when fetch throws', async () => {
+	const { result } = await withStubFetch(
+		[ () => { throw new Error( 'ENOTFOUND api.github.com' ); } ],
+		() => _internals.resolveReleaseZipUrl( { githubRepo: 'WordPress/mcp-adapter' } ),
+	);
+	assert.equal( result, null );
+} );
+
+test( 'resolveReleaseZipUrl: aborts on its own 5s timeout (signal wired up)', async () => {
+	// Stub fetch with a response that rejects when the signal aborts. This
+	// exercises the AbortController wiring without sitting on a real 5s wait
+	// (we trigger abort manually from inside the stub).
+	const { result } = await withStubFetch(
+		[ ( { init } ) => new Promise( ( _, reject ) => {
+			const signal = init?.signal;
+			if ( signal?.aborted ) {
+				reject( Object.assign( new Error( 'aborted' ), { name: 'AbortError' } ) );
+				return;
+			}
+			signal?.addEventListener?.( 'abort', () => {
+				reject( Object.assign( new Error( 'aborted' ), { name: 'AbortError' } ) );
+			} );
+			// Force the abort path immediately so the test does not actually
+			// wait 5s — verifies the signal is plumbed into fetch's init.
+			signal?.dispatchEvent?.( new Event( 'abort' ) );
+		} ) ],
+		() => _internals.resolveReleaseZipUrl( { githubRepo: 'WordPress/mcp-adapter' } ),
+	);
+	assert.equal( result, null );
+} );
+
+test( 'resolvePluginZipUrl: useReleases:false → trunk URL, no fetch', async () => {
+	const spec = { slug: 'abilities-api', githubRepo: 'WordPress/abilities-api', ref: 'trunk', useReleases: false };
+	const { result, calls } = await withStubFetch(
+		[],
+		() => _internals.resolvePluginZipUrl( spec ),
+	);
+	assert.equal( calls.length, 0, 'must not hit GitHub API when useReleases is false' );
+	assert.equal( result.source, 'trunk' );
+	assert.equal( result.url, 'https://github.com/WordPress/abilities-api/archive/refs/heads/trunk.zip' );
+} );
+
+test( 'resolvePluginZipUrl: useReleases:true + valid release → release URL', async () => {
+	const spec = { slug: 'mcp-adapter', githubRepo: 'WordPress/mcp-adapter', ref: 'trunk', useReleases: true };
+	const body = {
+		tag_name: 'v0.4.0',
+		assets: [ { name: 'mcp-adapter.zip', browser_download_url: 'https://example/mcp-adapter.zip' } ],
+	};
+	const { result, calls } = await withStubFetch(
+		[ jsonResp( body ) ],
+		() => _internals.resolvePluginZipUrl( spec ),
+	);
+	assert.equal( calls.length, 1 );
+	assert.equal( result.source, 'release' );
+	assert.equal( result.url, 'https://example/mcp-adapter.zip' );
+} );
+
+test( 'resolvePluginZipUrl: useReleases:true + 404 → falls back to trunk', async () => {
+	const spec = { slug: 'mcp-adapter', githubRepo: 'WordPress/mcp-adapter', ref: 'trunk', useReleases: true };
+	const { result, calls } = await withStubFetch(
+		[ jsonResp( {}, 404 ) ],
+		() => _internals.resolvePluginZipUrl( spec ),
+	);
+	assert.equal( calls.length, 1 );
+	assert.equal( result.source, 'trunk' );
+	assert.equal( result.url, 'https://github.com/WordPress/mcp-adapter/archive/refs/heads/trunk.zip' );
+} );
+
+test( 'resolvePluginZipUrl: refOverride bypasses release lookup', async () => {
+	const spec = { slug: 'mcp-adapter', githubRepo: 'WordPress/mcp-adapter', ref: 'trunk', useReleases: true };
+	const { result, calls } = await withStubFetch(
+		[],
+		() => _internals.resolvePluginZipUrl( spec, { refOverride: 'v0.3.0' } ),
+	);
+	assert.equal( calls.length, 0, 'refOverride must skip the release lookup' );
+	assert.equal( result.source, 'trunk' );
+	assert.equal( result.url, 'https://github.com/WordPress/mcp-adapter/archive/refs/heads/v0.3.0.zip' );
+} );
