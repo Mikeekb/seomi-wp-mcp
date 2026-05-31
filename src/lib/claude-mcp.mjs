@@ -67,39 +67,33 @@ export async function addServerEntry( projectDir, name, serverConfig ) {
 
 /**
  * Build a stdio + WP-CLI config for a LOCAL WordPress (machine-local WP-CLI).
+ *
+ * `siteUrl` is appended as `--url=<siteUrl>` when provided. Same reason as in
+ * `wp-plugin-installer.mjs::wpScopeFlags`: some WP installs `die()` during
+ * bootstrap when `$_SERVER['SERVER_NAME']` is empty (custom domain-gate code
+ * in `wp-config.php` typical of homemade multi-domain setups, plus genuine
+ * `home_url` / rewrite plugin cases). Without `--url`, `mcp-adapter serve`
+ * never registers and the MCP server immediately closes its stdio stream.
+ * Harmless on sites that don't need it.
  */
-export function buildStdioLocalConfig( { wpCliPharPath, wpRoot, user, mcpServerName = 'mcp-adapter-default-server' } ) {
-	return {
-		command: 'php',
-		args: [
-			wpCliPharPath,
-			'--path=' + wpRoot,
-			'mcp-adapter',
-			'serve',
-			'--server=' + mcpServerName,
-			'--user=' + user,
-		],
-		type: 'stdio',
-	};
+export function buildStdioLocalConfig( { wpCliPharPath, wpRoot, user, siteUrl, mcpServerName = 'mcp-adapter-default-server' } ) {
+	const args = [ wpCliPharPath, '--path=' + wpRoot ];
+	if ( siteUrl ) args.push( '--url=' + siteUrl );
+	args.push( 'mcp-adapter', 'serve', '--server=' + mcpServerName, '--user=' + user );
+	return { command: 'php', args, type: 'stdio' };
 }
 
 /**
  * Build a stdio + WP-CLI config for a REMOTE/PROD WordPress via SSH.
  * sshSpec format matches WP-CLI's --ssh=: `[user@]host[:port][/path]`.
+ *
+ * See `buildStdioLocalConfig` for why `siteUrl` → `--url=<siteUrl>` matters.
  */
-export function buildStdioSshConfig( { wpCliPharPath, sshSpec, user, mcpServerName = 'mcp-adapter-default-server' } ) {
-	return {
-		command: 'php',
-		args: [
-			wpCliPharPath,
-			'--ssh=' + sshSpec,
-			'mcp-adapter',
-			'serve',
-			'--server=' + mcpServerName,
-			'--user=' + user,
-		],
-		type: 'stdio',
-	};
+export function buildStdioSshConfig( { wpCliPharPath, sshSpec, user, siteUrl, mcpServerName = 'mcp-adapter-default-server' } ) {
+	const args = [ wpCliPharPath, '--ssh=' + sshSpec ];
+	if ( siteUrl ) args.push( '--url=' + siteUrl );
+	args.push( 'mcp-adapter', 'serve', '--server=' + mcpServerName, '--user=' + user );
+	return { command: 'php', args, type: 'stdio' };
 }
 
 /**

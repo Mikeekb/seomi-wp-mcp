@@ -589,6 +589,7 @@ export async function initCommand( opts ) {
 			wpCliPharPath,
 			wpRoot,
 			user: env.WP_LOCAL_USER,
+			siteUrl: env.WP_LOCAL_URL,
 		} );
 		localRes = await claudeAddServerEntry( cwd, env.WP_LOCAL_MCP_SERVER, localCfg );
 	}
@@ -600,6 +601,7 @@ export async function initCommand( opts ) {
 			wpCliPharPath,
 			sshSpec,
 			user: env.WP_PROD_USER,
+			siteUrl: env.WP_PROD_URL,
 		} );
 		prodRes = await claudeAddServerEntry( cwd, env.WP_PROD_MCP_SERVER, prodCfg );
 	} else if ( env.WP_PROD_URL && ! prodSsh ) {
