@@ -392,6 +392,7 @@ export async function doctorCommand( opts ) {
 		const r = await ensurePlugins( {
 			wpRoot,
 			wpCliPharPath: env?.WP_CLI_PHAR,
+			siteUrl: env?.WP_LOCAL_URL,
 			ref: opts[ 'pin-deps' ],
 		} );
 		for ( const item of r.results ) {

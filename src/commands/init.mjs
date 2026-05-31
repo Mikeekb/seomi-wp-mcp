@@ -488,6 +488,7 @@ export async function initCommand( opts ) {
 		depResults = await ensurePlugins( {
 			wpRoot,
 			wpCliPharPath,
+			siteUrl: env.WP_LOCAL_URL,
 			ref: opts[ 'pin-deps' ],
 		} );
 		if ( depResults.manualSnippet ) {
@@ -548,7 +549,7 @@ export async function initCommand( opts ) {
 
 		logger.step( 'Installing WP plugin dependencies on PROD (via SSH)' );
 		const sshSpec = composeSshSpec( prodSsh );
-		prodDepResults = await ensurePlugins( { sshSpec, wpCliPharPath, ref: opts[ 'pin-deps' ] } );
+		prodDepResults = await ensurePlugins( { sshSpec, wpCliPharPath, siteUrl: env.WP_PROD_URL, ref: opts[ 'pin-deps' ] } );
 		if ( prodDepResults.manualSnippet ) {
 			logger.warn( 'Some prod dependencies could not be installed automatically.' );
 			logger.warn( 'Manual commands:\n' + prodDepResults.manualSnippet );

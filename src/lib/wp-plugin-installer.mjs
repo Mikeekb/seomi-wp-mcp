@@ -75,13 +75,24 @@ function exec( cmd, args, opts = {} ) {
 }
 
 /**
- * Build WP-CLI scope flags: either --path=<wpRoot> (local) or --ssh=<spec> (remote).
- * Exactly one must be provided. SSH takes precedence if both are set.
+ * Build WP-CLI scope flags:
+ *   - `--ssh=<spec>` (remote) or `--path=<wpRoot>` (local) — exactly one;
+ *     SSH takes precedence if both are set.
+ *   - `--url=<siteUrl>` — appended when known. Required on sites whose
+ *     bootstrap path errors without it ("ERROR: The domain [] is not a valid
+ *     domain for this website."), seen on installs with home_url filters,
+ *     plugins like no-external-links, or atypical Nginx routing. Without
+ *     `--url`, `wp plugin install` can exit 0 while silently doing nothing
+ *     and `wp plugin is-active` lies based on a stale `active_plugins` DB row.
+ *     Harmless on sites that don't need it. Same approach as
+ *     `doctor.mjs::wpScopeArgs`.
  */
-function wpScopeFlags( { wpRoot, sshSpec } ) {
-	if ( sshSpec ) return [ '--ssh=' + sshSpec ];
-	if ( wpRoot ) return [ '--path=' + wpRoot ];
-	return [];
+function wpScopeFlags( { wpRoot, sshSpec, siteUrl } ) {
+	const out = [];
+	if ( sshSpec ) out.push( '--ssh=' + sshSpec );
+	else if ( wpRoot ) out.push( '--path=' + wpRoot );
+	if ( siteUrl ) out.push( '--url=' + siteUrl );
+	return out;
 }
 
 /**
@@ -207,6 +218,30 @@ async function pluginVendorAutoloadExists( scope, dep ) {
 	}
 	logger.debug( `vendor-check: ${ dep.slug } @ ${ scopeLabel } → null (no scope.wpRoot/sshSpec)` );
 	return null;
+}
+
+/**
+ * Post-install sanity check for release-tracked plugins.
+ *
+ * `wp plugin install --activate` can exit 0 without doing anything when wp-cli
+ * fails to bootstrap WordPress (e.g. "ERROR: The domain [] is not a valid
+ * domain for this website." on installs that need `--url=`). The exit code is
+ * useless in that case, so for release-tracked plugins we re-check that
+ * `vendor/autoload.php` actually landed on disk.
+ *
+ * Returns:
+ *   - `true`  when the dep is not release-tracked (nothing to verify), the
+ *             vendor file exists, OR the vendor check could not run (null —
+ *             benefit of the doubt, e.g. transient ssh blip).
+ *   - `false` only when the vendor file is definitively absent.
+ *
+ * Callers treat `false` as "wp-cli lied — record as failed".
+ */
+async function verifyInstallSucceeded( scope, dep ) {
+	if ( dep.useReleases !== true ) return true;
+	const hasVendor = await pluginVendorAutoloadExists( scope, dep );
+	if ( hasVendor === false ) return false;
+	return true;
 }
 
 async function wpCliInstall( scope, source ) {
@@ -379,6 +414,12 @@ function buildManualSnippet( deps, wpRoot, sshSpec ) {
  *                                            wp-cli is invoked as `php <phar>`. Strongly
  *                                            recommended on Windows to avoid the wp.bat
  *                                            shim issue with Node `spawn`.
+ * @param {string} [cfg.siteUrl]              Public site URL (https://example.com).
+ *                                            Passed to wp-cli as `--url=<siteUrl>` for
+ *                                            every call. Required on sites whose bootstrap
+ *                                            path errors out without it; see wpScopeFlags
+ *                                            for details. Recommended to always set when
+ *                                            known.
  * @param {Array}  [cfg.deps=DEFAULT_DEPS]    Plugin specs.
  * @param {string} [cfg.ref]                  Override git ref for all deps (e.g. 'main' or a tag).
  * @returns {Promise<{ results: Array, manualSnippet: string|null }>}
@@ -387,7 +428,8 @@ export async function ensurePlugins( cfg ) {
 	const wpRoot = cfg.wpRoot;
 	const sshSpec = cfg.sshSpec;
 	const wpCliPharPath = cfg.wpCliPharPath;
-	const scope = { wpRoot, sshSpec, wpCliPharPath };
+	const siteUrl = cfg.siteUrl;
+	const scope = { wpRoot, sshSpec, wpCliPharPath, siteUrl };
 	const scopeLabel = sshSpec ? `ssh:${ sshSpec }` : wpRoot;
 	// `cfg.ref` is the --pin-deps override. We keep it as a separate refOverride
 	// instead of mutating each dep's `ref`, because resolvePluginZipUrl needs to
@@ -446,13 +488,16 @@ export async function ensurePlugins( cfg ) {
 						logger.warn( `${ dep.slug }: active but vendor/autoload.php missing — forcing reinstall from release asset` );
 						const { url: zip, source } = await resolvePluginZipUrl( dep, { refOverride } );
 						const ok = await wpCliInstall( scope, zip );
-						if ( ok ) {
+						if ( ok && await verifyInstallSucceeded( scope, dep ) ) {
 							logger.success( `${ dep.slug } reinstalled from release asset (source: ${ source })` );
 							results.push( { slug: dep.slug, action: 'reinstalled', strategy: sshSpec ? 'wp-cli-ssh' : 'wp-cli', source, reason: 'missing-vendor' } );
 							continue;
 						}
-						logger.warn( `${ dep.slug }: forced reinstall failed — see WP-CLI stderr above` );
-						results.push( { slug: dep.slug, action: 'failed', error: 'forced reinstall failed', reason: 'missing-vendor' } );
+						const why = ok
+							? 'wp-cli reported success but vendor/autoload.php still missing — wp-cli likely exited 0 after a bootstrap error (try passing siteUrl to ensurePlugins so --url= is set)'
+							: 'forced reinstall failed — see WP-CLI stderr above';
+						logger.warn( `${ dep.slug }: ${ why }` );
+						results.push( { slug: dep.slug, action: 'failed', error: why, reason: 'missing-vendor' } );
 						continue;
 					}
 					logger.debug( `${ dep.slug }: vendor check returned ${ hasVendor } — keeping active` );
@@ -463,12 +508,22 @@ export async function ensurePlugins( cfg ) {
 			}
 			const { url: zip, source } = await resolvePluginZipUrl( dep, { refOverride } );
 			const ok = await wpCliInstall( scope, zip );
-			if ( ok ) {
+			if ( ok && await verifyInstallSucceeded( scope, dep ) ) {
 				logger.success( `${ dep.slug } installed and activated via WP-CLI (source: ${ source })` );
 				results.push( { slug: dep.slug, action: 'installed', strategy: sshSpec ? 'wp-cli-ssh' : 'wp-cli', source } );
 				continue;
 			}
-			logger.warn( `WP-CLI install failed for ${ dep.slug } — falling back to zip download` );
+			if ( ok ) {
+				// Phantom-success: wp-cli exit 0 but vendor never landed.
+				logger.warn( `${ dep.slug }: WP-CLI reported success but vendor/autoload.php is missing — wp-cli likely exited 0 after a bootstrap error (try passing siteUrl to ensurePlugins so --url= is set)` );
+				if ( sshSpec ) {
+					results.push( { slug: dep.slug, action: 'failed', error: 'phantom success: vendor missing after install', reason: 'missing-vendor' } );
+					continue;
+				}
+				// Local: fall through to zip-download fallback below.
+			} else {
+				logger.warn( `WP-CLI install failed for ${ dep.slug } — falling back to zip download` );
+			}
 			if ( sshSpec ) {
 				results.push( { slug: dep.slug, action: 'failed', error: 'wp-cli install failed and zip fallback not available over ssh' } );
 				continue;
@@ -595,4 +650,4 @@ async function maybeRunComposerInstall( pluginDir ) {
 	return { ran: true, ok: true };
 }
 
-export const _internals = { buildZipUrl, buildManualSnippet, exec, runWp, resolveReleaseZipUrl, resolvePluginZipUrl, pluginVendorAutoloadExists };
+export const _internals = { buildZipUrl, buildManualSnippet, exec, runWp, resolveReleaseZipUrl, resolvePluginZipUrl, pluginVendorAutoloadExists, verifyInstallSucceeded, wpScopeFlags };

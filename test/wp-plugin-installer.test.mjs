@@ -396,12 +396,21 @@ test( 'ensurePlugins: reinstall release plugin when active but vendor missing', 
 	try {
 		const deps = [ { slug: 'mcp-adapter', githubRepo: 'WordPress/mcp-adapter', ref: 'trunk', useReleases: true, label: 'MCP Adapter' } ];
 		const { result } = await withStubFetch( [ jsonResp( RELEASE_BODY ) ], () => withRouterExec(
-			( cmd, args ) => {
+			async ( cmd, args ) => {
 				const call = { cmd, args };
 				if ( isWpInfo( call ) ) return { code: 0, stdout: 'WP-CLI 2.12.0', stderr: '' };
 				if ( isCoreVersion( call ) ) return { code: 0, stdout: '6.5\n', stderr: '' };
 				if ( isIsActive( call, 'mcp-adapter' ) ) return { code: 0, stdout: '', stderr: '' };
-				if ( isPluginInstall( call ) ) return { code: 0, stdout: 'Plugin installed.\n', stderr: '' };
+				if ( isPluginInstall( call ) ) {
+					// Simulate the side effect of a real install: vendor/autoload.php
+					// shows up on disk. ensurePlugins now re-verifies this after
+					// install — without the side effect the install would be (correctly)
+					// reported as failed phantom-success.
+					const dir = join( wpRoot, 'wp-content', 'plugins', 'mcp-adapter', 'vendor' );
+					await mkdir( dir, { recursive: true } );
+					await writeFile( join( dir, 'autoload.php' ), '<?php // stub\n', 'utf8' );
+					return { code: 0, stdout: 'Plugin installed.\n', stderr: '' };
+				}
 				return { code: 0, stdout: '', stderr: '' };
 			},
 			() => ensurePlugins( { wpRoot, wpCliPharPath: 'C:/wp-cli/wp-cli.phar', deps } ),
@@ -579,4 +588,187 @@ test( 'pluginVendorAutoloadExists: SSH port omitted → ssh called without -p', 
 	const call = stub.calls[ 0 ];
 	assert.ok( ! call.args.includes( '-p' ), 'no -p when port absent' );
 	assert.ok( call.args.includes( '-o' ) && call.args.includes( 'BatchMode=yes' ), 'BatchMode=yes must be set' );
+} );
+
+/* -----------------------------------------------------------------------
+ * --url= propagation tests.
+ *
+ * Some installs (home_url filters, no-external-links, atypical routing)
+ * make wp-cli bail out before bootstrap unless `--url=<siteUrl>` is passed.
+ * Without it, `wp plugin install` can exit 0 having done nothing — the
+ * exact phantom-success bug that fooled the installer on a real prod site.
+ * --------------------------------------------------------------------- */
+
+test( 'wpScopeFlags: appends --url when siteUrl is set (local)', () => {
+	const flags = _internals.wpScopeFlags( { wpRoot: '/var/www/wp', siteUrl: 'https://example.com' } );
+	assert.deepEqual( flags, [ '--path=/var/www/wp', '--url=https://example.com' ] );
+} );
+
+test( 'wpScopeFlags: appends --url when siteUrl is set (ssh)', () => {
+	const flags = _internals.wpScopeFlags( { sshSpec: 'u@h/path', siteUrl: 'https://example.com' } );
+	assert.deepEqual( flags, [ '--ssh=u@h/path', '--url=https://example.com' ] );
+} );
+
+test( 'wpScopeFlags: omits --url when siteUrl is falsy', () => {
+	assert.deepEqual( _internals.wpScopeFlags( { wpRoot: '/var/www/wp' } ), [ '--path=/var/www/wp' ] );
+	assert.deepEqual( _internals.wpScopeFlags( { sshSpec: 'u@h/path', siteUrl: '' } ), [ '--ssh=u@h/path' ] );
+	assert.deepEqual( _internals.wpScopeFlags( { wpRoot: '/var/www/wp', siteUrl: undefined } ), [ '--path=/var/www/wp' ] );
+} );
+
+test( 'runWp: propagates --url to wp-cli call when scope.siteUrl is set (ssh)', async () => {
+	const { stub } = await withStubExec(
+		{ code: 0, stdout: '', stderr: '' },
+		() => _internals.runWp(
+			{ sshSpec: 'u@h/var/www/wp', wpCliPharPath: 'C:/wp-cli/wp-cli.phar', siteUrl: 'https://example.com' },
+			[ 'plugin', 'install', 'https://example/foo.zip', '--activate', '--force' ],
+		),
+	);
+	const call = stub.calls[ 0 ];
+	assert.equal( call.cmd, 'php' );
+	assert.ok( call.args.includes( '--ssh=u@h/var/www/wp' ) );
+	assert.ok( call.args.includes( '--url=https://example.com' ), 'wp plugin install must receive --url' );
+} );
+
+test( 'runWp: propagates --url to wp-cli call when scope.siteUrl is set (local)', async () => {
+	const { stub } = await withStubExec(
+		{ code: 0, stdout: '', stderr: '' },
+		() => _internals.runWp(
+			{ wpRoot: 'C:/wamp/www/site', wpCliPharPath: 'C:/wp-cli/wp-cli.phar', siteUrl: 'https://localhost' },
+			[ 'plugin', 'is-active', 'mcp-adapter' ],
+		),
+	);
+	const call = stub.calls[ 0 ];
+	assert.ok( call.args.includes( '--path=C:/wamp/www/site' ) );
+	assert.ok( call.args.includes( '--url=https://localhost' ) );
+} );
+
+/* -----------------------------------------------------------------------
+ * Phantom-success guard tests.
+ *
+ * Real-world bug: on some prod sites `wp plugin install` exits 0 without
+ * actually installing anything (wp-cli prints a bootstrap error like
+ * "ERROR: The domain [] is not a valid domain for this website." but the
+ * exit code stays 0). For release-tracked plugins, ensurePlugins must
+ * re-verify vendor/autoload.php landed before reporting success.
+ * --------------------------------------------------------------------- */
+
+test( 'verifyInstallSucceeded: useReleases:false → always true (no vendor probe)', async () => {
+	const { result, stub } = await withStubExec(
+		{ code: 0, stdout: '', stderr: '' },
+		() => _internals.verifyInstallSucceeded(
+			{ sshSpec: 'u@h/var/www/wp' },
+			{ slug: 'abilities-api', useReleases: false },
+		),
+	);
+	assert.equal( result, true );
+	assert.equal( stub.calls.length, 0, 'must not run vendor probe when dep is not release-tracked' );
+} );
+
+test( 'verifyInstallSucceeded: useReleases:true + vendor present → true', async () => {
+	const wpRoot = await makeWpRoot( { vendorFor: [ 'mcp-adapter' ] } );
+	try {
+		const ok = await _internals.verifyInstallSucceeded(
+			{ wpRoot },
+			{ slug: 'mcp-adapter', useReleases: true },
+		);
+		assert.equal( ok, true );
+	} finally {
+		await rm( wpRoot, { recursive: true, force: true } );
+	}
+} );
+
+test( 'verifyInstallSucceeded: useReleases:true + vendor missing → false', async () => {
+	const wpRoot = await makeWpRoot();
+	try {
+		const ok = await _internals.verifyInstallSucceeded(
+			{ wpRoot },
+			{ slug: 'mcp-adapter', useReleases: true },
+		);
+		assert.equal( ok, false );
+	} finally {
+		await rm( wpRoot, { recursive: true, force: true } );
+	}
+} );
+
+test( 'verifyInstallSucceeded: useReleases:true + vendor check inconclusive (null) → true (benefit of doubt)', async () => {
+	// SSH scope without wpRoot → pluginVendorAutoloadExists returns null.
+	const ok = await _internals.verifyInstallSucceeded(
+		{ sshSpec: 'u@h' },
+		{ slug: 'mcp-adapter', useReleases: true },
+	);
+	assert.equal( ok, true );
+} );
+
+test( 'ensurePlugins: phantom-success on forced reinstall is reported as failed', async () => {
+	// Local mode where mcp-adapter is "active" (wp plugin is-active exits 0) but
+	// vendor/autoload.php is absent BOTH before AND after the forced reinstall
+	// (wp-cli lies with exit 0). The old code reported `reinstalled`; the new
+	// code must report `failed`.
+	const wpRoot = await makeWpRoot();
+	try {
+		const deps = [ { slug: 'mcp-adapter', githubRepo: 'WordPress/mcp-adapter', ref: 'trunk', useReleases: true, label: 'MCP Adapter' } ];
+		const { result } = await withStubFetch( [ jsonResp( RELEASE_BODY ) ], () => withRouterExec(
+			( cmd, args ) => {
+				const call = { cmd, args };
+				if ( isWpInfo( call ) ) return { code: 0, stdout: 'WP-CLI 2.12.0', stderr: '' };
+				if ( isCoreVersion( call ) ) return { code: 0, stdout: '6.5\n', stderr: '' };
+				if ( isIsActive( call, 'mcp-adapter' ) ) return { code: 0, stdout: '', stderr: '' };
+				// `wp plugin install` "succeeds" but never actually writes vendor/.
+				if ( isPluginInstall( call ) ) return { code: 0, stdout: 'ERROR: bootstrap problem\n', stderr: '' };
+				return { code: 0, stdout: '', stderr: '' };
+			},
+			() => ensurePlugins( { wpRoot, wpCliPharPath: 'C:/wp-cli/wp-cli.phar', deps } ),
+		) );
+
+		const entry = result.result.results.find( ( r ) => r.slug === 'mcp-adapter' );
+		assert.equal( entry.action, 'failed', 'phantom-success forced reinstall must be reported as failed' );
+		assert.equal( entry.reason, 'missing-vendor' );
+		assert.match( entry.error, /vendor/i, 'failure reason should mention vendor' );
+	} finally {
+		await rm( wpRoot, { recursive: true, force: true } );
+	}
+} );
+
+test( 'ensurePlugins: phantom-success on fresh SSH install is reported as failed', async () => {
+	// SSH mode, plugin not yet active. wp-cli reports install exit 0 but
+	// vendor never lands. Must NOT report `installed`.
+	const deps = [ { slug: 'mcp-adapter', githubRepo: 'WordPress/mcp-adapter', ref: 'trunk', useReleases: true, label: 'MCP Adapter' } ];
+	const { result } = await withStubFetch( [ jsonResp( RELEASE_BODY ) ], () => withRouterExec(
+		( cmd, args ) => {
+			const call = { cmd, args };
+			if ( isWpInfo( call ) ) return { code: 0, stdout: 'WP-CLI 2.12.0', stderr: '' };
+			if ( isCoreVersion( call ) ) return { code: 0, stdout: '6.5\n', stderr: '' };
+			if ( isIsActive( call, 'mcp-adapter' ) ) return { code: 1, stdout: '', stderr: '' };
+			if ( isPluginInstall( call ) ) return { code: 0, stdout: 'ERROR: bootstrap problem\n', stderr: '' };
+			// vendor probe after install: ssh test -f → exit 1 = absent
+			if ( isSshTestF( call ) ) return { code: 1, stdout: '', stderr: '' };
+			return { code: 0, stdout: '', stderr: '' };
+		},
+		() => ensurePlugins( { sshSpec: 'u@h/var/www/wp', wpCliPharPath: 'C:/wp-cli/wp-cli.phar', deps } ),
+	) );
+
+	const entry = result.result.results.find( ( r ) => r.slug === 'mcp-adapter' );
+	assert.equal( entry.action, 'failed', 'phantom-success fresh install over SSH must be reported as failed' );
+	assert.equal( entry.reason, 'missing-vendor' );
+} );
+
+test( 'ensurePlugins: real fresh install over SSH still reports installed when vendor lands', async () => {
+	// Sanity: when vendor probe actually returns true after install, the result is `installed`.
+	const deps = [ { slug: 'mcp-adapter', githubRepo: 'WordPress/mcp-adapter', ref: 'trunk', useReleases: true, label: 'MCP Adapter' } ];
+	const { result } = await withStubFetch( [ jsonResp( RELEASE_BODY ) ], () => withRouterExec(
+		( cmd, args ) => {
+			const call = { cmd, args };
+			if ( isWpInfo( call ) ) return { code: 0, stdout: 'WP-CLI 2.12.0', stderr: '' };
+			if ( isCoreVersion( call ) ) return { code: 0, stdout: '6.5\n', stderr: '' };
+			if ( isIsActive( call, 'mcp-adapter' ) ) return { code: 1, stdout: '', stderr: '' };
+			if ( isPluginInstall( call ) ) return { code: 0, stdout: 'Plugin installed.\n', stderr: '' };
+			if ( isSshTestF( call ) ) return { code: 0, stdout: '', stderr: '' }; // vendor present
+			return { code: 0, stdout: '', stderr: '' };
+		},
+		() => ensurePlugins( { sshSpec: 'u@h/var/www/wp', wpCliPharPath: 'C:/wp-cli/wp-cli.phar', deps } ),
+	) );
+
+	const entry = result.result.results.find( ( r ) => r.slug === 'mcp-adapter' );
+	assert.equal( entry.action, 'installed' );
+	assert.equal( entry.source, 'release' );
 } );
