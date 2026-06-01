@@ -55,10 +55,21 @@ async function readEnv( cwd ) {
  * Build the common WP-CLI scope flags. Always passes --path; when a site URL
  * is known, also passes --url so multisite installs (which require a current
  * blog context for `wp eval`) work without "domain [] is not a valid domain".
+ *
+ * When `opts.skipPluginsAndThemes` is true (default for commands that don't
+ * need third-party plugins loaded), appends `--skip-plugins --skip-themes`.
+ * This dodges a class of bugs where a broken plugin (Yoast SEO + PHP 8.4
+ * deprecations, etc.) kills wp-cli during bootstrap with exit 0. Opt OUT for
+ * `wp eval` checks that need user plugins to be loaded (e.g. `function_exists`
+ * for an Abilities API helper that lives in the abilities-api plugin on
+ * WP < 6.9).
  */
-function wpScopeArgs( wpRoot, siteUrl ) {
+function wpScopeArgs( wpRoot, siteUrl, opts = {} ) {
 	const out = [ '--path=' + wpRoot ];
 	if ( siteUrl ) out.push( '--url=' + siteUrl );
+	if ( opts.skipPluginsAndThemes !== false ) {
+		out.push( '--skip-plugins', '--skip-themes' );
+	}
 	return out;
 }
 
@@ -78,10 +89,14 @@ async function wpPluginIsActive( wpRoot, slug, wpCliPharPath, siteUrl ) {
  * On multisite installs `wp eval` MUST receive --url=<site> or it bails out
  * before loading core hooks; passing siteUrl here makes the probe robust on
  * both single-site and multisite.
+ *
+ * Note: this check does NOT add `--skip-plugins`. On WP < 6.9 the Abilities
+ * API helpers live in the `abilities-api` plugin, so skipping plugins would
+ * give a false negative.
  */
 async function wpFunctionExists( wpRoot, fn, wpCliPharPath, siteUrl ) {
 	const phpExpr = `echo function_exists("${ fn }") ? "yes" : "no";`;
-	const args = [ 'eval', phpExpr, ...wpScopeArgs( wpRoot, siteUrl ) ];
+	const args = [ 'eval', phpExpr, ...wpScopeArgs( wpRoot, siteUrl, { skipPluginsAndThemes: false } ) ];
 	const r = wpCliPharPath
 		? await exec( 'php', [ wpCliPharPath, ...args ] )
 		: await exec( 'wp', args, { shell: process.platform === 'win32' } );

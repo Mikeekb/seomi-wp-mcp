@@ -86,12 +86,23 @@ function exec( cmd, args, opts = {} ) {
  *     and `wp plugin is-active` lies based on a stale `active_plugins` DB row.
  *     Harmless on sites that don't need it. Same approach as
  *     `doctor.mjs::wpScopeArgs`.
+ *   - `--skip-plugins --skip-themes` — appended always. Third-party plugins
+ *     (Yoast SEO + PHP 8.4 deprecations, broken theme functions.php, etc.)
+ *     can throw fatals or die() during wp-cli bootstrap, leaving `wp plugin
+ *     install` exit 0 with no install actually happening. Skipping regular
+ *     plugins and the active theme during plugin-management commands is safe
+ *     because: (a) mu-plugins still load, so our seomi-mcp-abilities loader
+ *     keeps working; (b) the install/activate hooks of the plugin BEING
+ *     installed still run; (c) `is-active`/`core version` only read DB and
+ *     wp-includes, not third-party code. Closes the whole class of "exit 0
+ *     but nothing happened" failures regardless of which plugin is to blame.
  */
 function wpScopeFlags( { wpRoot, sshSpec, siteUrl } ) {
 	const out = [];
 	if ( sshSpec ) out.push( '--ssh=' + sshSpec );
 	else if ( wpRoot ) out.push( '--path=' + wpRoot );
 	if ( siteUrl ) out.push( '--url=' + siteUrl );
+	out.push( '--skip-plugins', '--skip-themes' );
 	return out;
 }
 

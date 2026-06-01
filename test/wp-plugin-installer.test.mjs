@@ -601,18 +601,34 @@ test( 'pluginVendorAutoloadExists: SSH port omitted → ssh called without -p', 
 
 test( 'wpScopeFlags: appends --url when siteUrl is set (local)', () => {
 	const flags = _internals.wpScopeFlags( { wpRoot: '/var/www/wp', siteUrl: 'https://example.com' } );
-	assert.deepEqual( flags, [ '--path=/var/www/wp', '--url=https://example.com' ] );
+	assert.deepEqual( flags, [ '--path=/var/www/wp', '--url=https://example.com', '--skip-plugins', '--skip-themes' ] );
 } );
 
 test( 'wpScopeFlags: appends --url when siteUrl is set (ssh)', () => {
 	const flags = _internals.wpScopeFlags( { sshSpec: 'u@h/path', siteUrl: 'https://example.com' } );
-	assert.deepEqual( flags, [ '--ssh=u@h/path', '--url=https://example.com' ] );
+	assert.deepEqual( flags, [ '--ssh=u@h/path', '--url=https://example.com', '--skip-plugins', '--skip-themes' ] );
 } );
 
 test( 'wpScopeFlags: omits --url when siteUrl is falsy', () => {
-	assert.deepEqual( _internals.wpScopeFlags( { wpRoot: '/var/www/wp' } ), [ '--path=/var/www/wp' ] );
-	assert.deepEqual( _internals.wpScopeFlags( { sshSpec: 'u@h/path', siteUrl: '' } ), [ '--ssh=u@h/path' ] );
-	assert.deepEqual( _internals.wpScopeFlags( { wpRoot: '/var/www/wp', siteUrl: undefined } ), [ '--path=/var/www/wp' ] );
+	assert.deepEqual( _internals.wpScopeFlags( { wpRoot: '/var/www/wp' } ), [ '--path=/var/www/wp', '--skip-plugins', '--skip-themes' ] );
+	assert.deepEqual( _internals.wpScopeFlags( { sshSpec: 'u@h/path', siteUrl: '' } ), [ '--ssh=u@h/path', '--skip-plugins', '--skip-themes' ] );
+	assert.deepEqual( _internals.wpScopeFlags( { wpRoot: '/var/www/wp', siteUrl: undefined } ), [ '--path=/var/www/wp', '--skip-plugins', '--skip-themes' ] );
+} );
+
+test( 'wpScopeFlags: always includes --skip-plugins and --skip-themes', () => {
+	// Defensive guard: every wp-cli call from the installer must skip third-party
+	// plugins/themes so a broken plugin (Yoast SEO + PHP 8.4 deprecations, etc.)
+	// cannot kill wp-cli during bootstrap and produce a phantom exit-0.
+	for ( const scope of [
+		{ wpRoot: '/x' },
+		{ sshSpec: 'u@h/x' },
+		{ wpRoot: '/x', siteUrl: 'https://x.test' },
+		{ sshSpec: 'u@h/x', siteUrl: 'https://x.test' },
+	] ) {
+		const flags = _internals.wpScopeFlags( scope );
+		assert.ok( flags.includes( '--skip-plugins' ), `--skip-plugins missing for ${ JSON.stringify( scope ) }` );
+		assert.ok( flags.includes( '--skip-themes' ), `--skip-themes missing for ${ JSON.stringify( scope ) }` );
+	}
 } );
 
 test( 'runWp: propagates --url to wp-cli call when scope.siteUrl is set (ssh)', async () => {
