@@ -17,7 +17,9 @@ Commands:
                  Creates .claude/.env, connects mu-plugin (submodule/composer/copy),
                  installs WP plugin deps (Abilities API + MCP Adapter), registers
                  MCP servers in Claude, drops the aif-wp-mcp skill, updates CLAUDE.md.
-  update         Pull latest mu-plugin version and regenerate managed sections.
+  update         Check npm for a newer seomi-wp-mcp, self-update if available,
+                 then pull latest mu-plugin version and regenerate managed
+                 sections. Use --no-self-update to skip the npm version check.
   doctor         Verify the local setup (env, mu-plugin, MCP servers, plugin deps).
 
 Global options:
@@ -60,6 +62,7 @@ async function main() {
 			'pin-deps': { type: 'string' },
 			target: { type: 'string', default: 'local' },
 			fix: { type: 'boolean', default: false },
+			'self-update': { type: 'boolean', default: true },
 		},
 		strict: false,
 		allowPositionals: true,
@@ -67,6 +70,12 @@ async function main() {
 
 	if ( values.verbose ) {
 		logger.setLevel( 'debug' );
+	}
+
+	// parseArgs has no built-in `--no-<flag>` negation, so fold it in manually
+	// (`--no-self-update` arrives as a separate `no-self-update` key).
+	if ( values[ 'no-self-update' ] ) {
+		values[ 'self-update' ] = false;
 	}
 
 	const opts = { ...values, positionals };

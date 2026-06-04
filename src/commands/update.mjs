@@ -12,11 +12,13 @@ import { existsSync } from 'node:fs';
 import { readFile, cp, rm, mkdir } from 'node:fs/promises';
 import { join, resolve as resolvePath } from 'node:path';
 import { spawn } from 'node:child_process';
+import { confirm } from '@inquirer/prompts';
 import { logger } from '../lib/logger.mjs';
 import { insertOrUpdate as updateMarkerBlock } from '../lib/markers.mjs';
 import { renderClaudeMdBlock } from '../lib/claude-md-renderer.mjs';
 import { detectAgentMdTargets } from '../lib/agent-md-target.mjs';
 import { detectThemeOrPluginSlug } from '../lib/project-asset-detector.mjs';
+import { checkForUpdate, performSelfUpdate } from '../lib/self-update.mjs';
 
 const MU_PLUGIN_DIR = 'wp-content/mu-plugins/seomi-mcp-abilities';
 const PLUGIN_HEADER_FILE = MU_PLUGIN_DIR + '/seomi-mcp-abilities.php';
@@ -70,9 +72,73 @@ function detectMode( cwd ) {
 	return 'none';
 }
 
-export async function updateCommand( opts ) {
+/**
+ * After a successful self-update, the freshly installed code is NOT loaded in
+ * this process — re-running is the only way to apply it. Offer to do that now
+ * (interactive TTY) or print the command to run (non-interactive).
+ * Returns the exit code to propagate.
+ */
+async function offerRerun() {
+	const bin = process.platform === 'win32' ? 'seomi-wp-mcp.cmd' : 'seomi-wp-mcp';
+	if ( process.stdin.isTTY ) {
+		const again = await confirm( {
+			message: 'Re-run update now with the new version to refresh project files?',
+			default: true,
+		} );
+		if ( again ) {
+			logger.step( 'Re-running update with the new version' );
+			// --no-self-update guards against a check→update→check loop.
+			const r = await exec( bin, [ 'update', '--no-self-update' ], { stdio: 'inherit', shell: true } );
+			return r.code ?? 0;
+		}
+	}
+	logger.info( 'Run `seomi-wp-mcp update` again to refresh the project files with the new version.' );
+	return 0;
+}
+
+/**
+ * Self-update gate. Returns { stop, code }:
+ *   stop=true  → a newer version was installed; caller should return `code`.
+ *   stop=false → nothing to update (or npm unreachable); caller proceeds.
+ */
+async function runSelfUpdateGate() {
+	logger.step( 'Checking npm for a newer seomi-wp-mcp version' );
+	const info = await checkForUpdate();
+
+	if ( ! info.checked ) {
+		logger.warn( 'Could not reach npm to check for updates — continuing with the current version.' );
+		return { stop: false };
+	}
+	if ( ! info.hasUpdate ) {
+		logger.success( `seomi-wp-mcp is up to date (${ info.current }).` );
+		return { stop: false };
+	}
+
+	logger.info( `New version available: ${ info.current } → ${ info.latest }. Updating the global package…` );
+	const res = await performSelfUpdate();
+	if ( ! res.ok ) {
+		logger.warn( `Self-update failed${ res.error ? ` (${ res.error })` : '' } — continuing with the current version.` );
+		return { stop: false };
+	}
+
+	logger.success( `Updated seomi-wp-mcp to ${ info.latest }.` );
+	const code = await offerRerun();
+	return { stop: true, code };
+}
+
+export async function updateCommand( opts = {} ) {
 	const cwd = process.cwd();
 	logger.step( `seomi-wp-mcp update — cwd: ${ cwd }` );
+
+	// Step 0: self-update gate. If a newer CLI version exists, upgrade the
+	// global package first and hand off to the new code (via re-run). Skipped
+	// with --no-self-update (used by the re-run itself and by tests/CI).
+	if ( opts[ 'self-update' ] !== false ) {
+		const gate = await runSelfUpdateGate();
+		if ( gate.stop ) {
+			return gate.code ?? 0;
+		}
+	}
 
 	const before = await readPluginVersion( cwd );
 	logger.info( `Plugin version before: ${ before ?? '(not installed)' }` );
