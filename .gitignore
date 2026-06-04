@@ -16,5 +16,10 @@ Thumbs.db
 .env.local
 *.log
 
-# Claude Code local settings (machine-specific)
-.claude/settings.local.json
+# AI tooling / local setup (not shipped to npm, not part of the public repo)
+.ai-factory/
+.ai-factory.json
+.claude/
+.mcp.json
+AGENTS.md
+RESEARCH.md
