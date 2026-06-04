@@ -92,6 +92,32 @@ test( 'gitignored fallback: warns, runs clone + rm -rf .git, returns submodule-f
 	}
 } );
 
+test( 'not-a-repo fallback: warns, runs clone + rm -rf .git, returns submodule-fallback-copy', async () => {
+	const cwd = await makeCwd();
+	try {
+		const stderr = 'fatal: not a git repository (or any of the parent directories): .git\n';
+		const { result, stub } = await withStub( ( cmd, args ) => {
+			if ( isSubmoduleAdd( cmd, args ) ) return { code: 128, stdout: '', stderr };
+			if ( isGitClone( cmd, args ) ) return { code: 0, stdout: '', stderr: '' };
+			if ( isRmGit( cmd, args ) ) return { code: 0, stdout: '', stderr: '' };
+			return { code: 0, stdout: '', stderr: '' };
+		}, () => connectMuPlugin( cwd, 'submodule' ) );
+
+		assert.equal( result.strategy, 'submodule-fallback-copy' );
+		assert.equal( result.action, 'added' );
+		assert.equal( result.fallbackReason, 'not-a-repo' );
+		assert.equal( stub.calls.length, 3 );
+		assert.ok( isSubmoduleAdd( stub.calls[ 0 ].cmd, stub.calls[ 0 ].args ) );
+		assert.ok( isGitClone( stub.calls[ 1 ].cmd, stub.calls[ 1 ].args ) );
+		assert.equal( stub.calls[ 1 ].args[ 1 ], '--depth=1' );
+		assert.equal( stub.calls[ 1 ].args[ 2 ], MU_PLUGIN_REPO_URL );
+		assert.equal( stub.calls[ 1 ].args[ 3 ], join( cwd, MU_PLUGIN_DIR ) );
+		assert.ok( isRmGit( stub.calls[ 2 ].cmd, stub.calls[ 2 ].args ) );
+	} finally {
+		await rm( cwd, { recursive: true, force: true } );
+	}
+} );
+
 test( 'non-gitignored submodule failure: returns failed, no clone fallback', async () => {
 	const cwd = await makeCwd();
 	try {

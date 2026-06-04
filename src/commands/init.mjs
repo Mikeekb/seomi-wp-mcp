@@ -259,13 +259,25 @@ async function connectMuPlugin( cwd, mode ) {
 		if ( r.code === 0 ) {
 			return { strategy: 'submodule', action: 'added' };
 		}
-		// git submodule add refuses to add paths covered by .gitignore.
-		// Standard WP projects ignore wp-content/, which traps the recommended
-		// strategy. Detect the marker and fall back to plain clone (no submodule
-		// pointer, same payload as the 'copy' mode below).
+		// git submodule add can't run in two common situations:
+		//  - the target path is covered by .gitignore (standard WP projects
+		//    ignore wp-content/, which traps the recommended strategy), or
+		//  - the project isn't a git repository at all (`fatal: not a git
+		//    repository` — e.g. a bare WP install dropped into a plain folder).
+		// In both cases a plain clone works fine (it needs no enclosing repo),
+		// so detect either marker and fall back to it (no submodule pointer,
+		// same payload as the 'copy' mode below). A genuine network/remote
+		// failure matches neither marker and is reported as failed — cloning
+		// would only fail again.
 		const stderr = r.stderr || '';
-		if ( /ignored by .*\.gitignore/i.test( stderr ) ) {
-			logger.warn( `${ MU_PLUGIN_DIR } is ignored by .gitignore — submodule cannot be added; falling back to plain clone` );
+		const gitignored = /ignored by .*\.gitignore/i.test( stderr );
+		const notARepo = /not a git repository/i.test( stderr );
+		if ( gitignored || notARepo ) {
+			const fallbackReason = gitignored ? 'gitignored' : 'not-a-repo';
+			const reasonMsg = gitignored
+				? `${ MU_PLUGIN_DIR } is ignored by .gitignore`
+				: `${ cwd } is not a git repository`;
+			logger.warn( `${ reasonMsg } — submodule cannot be added; falling back to plain clone` );
 			logger.step( `Cloning mu-plugin directly: ${ MU_PLUGIN_REPO_URL } -> ${ MU_PLUGIN_DIR }` );
 			const c = await _internals.exec( 'git', [ 'clone', '--depth=1', MU_PLUGIN_REPO_URL, targetDir ], { cwd } );
 			if ( c.code !== 0 ) {
@@ -273,8 +285,8 @@ async function connectMuPlugin( cwd, mode ) {
 				return { strategy: 'submodule', action: 'failed', error: c.stderr, fallbackAttempted: 'copy' };
 			}
 			await _internals.exec( 'rm', [ '-rf', join( targetDir, '.git' ) ] );
-			logger.success( `mu-plugin cloned to ${ MU_PLUGIN_DIR } (submodule fallback)` );
-			return { strategy: 'submodule-fallback-copy', action: 'added', fallbackReason: 'gitignored' };
+			logger.success( `mu-plugin cloned to ${ MU_PLUGIN_DIR } (submodule fallback, reason: ${ fallbackReason })` );
+			return { strategy: 'submodule-fallback-copy', action: 'added', fallbackReason };
 		}
 		logger.error( `git submodule add failed: ${ stderr.trim() }` );
 		return { strategy: 'submodule', action: 'failed', error: stderr };
