@@ -24,7 +24,7 @@ import { logger } from '../lib/logger.mjs';
 import { mergeEnv } from '../lib/env-writer.mjs';
 import { insertOrUpdate as updateMarkerBlock } from '../lib/markers.mjs';
 import { renderClaudeMdBlock } from '../lib/claude-md-renderer.mjs';
-import { detectAgentMdTargets } from '../lib/agent-md-target.mjs';
+import { detectAgentMdTargets, ensureClaudeImportStub, isClaudeImportStub } from '../lib/agent-md-target.mjs';
 import {
 	addServerEntry as claudeAddServerEntry,
 	buildStdioLocalConfig,
@@ -342,6 +342,14 @@ async function updateAgentMd( cwd, env, targets ) {
 	const results = [];
 	for ( const targetPath of targets ) {
 		const name = targetPath.split( /[\\/]/ ).pop();
+		// A CLAUDE.md that only imports AGENTS.md is an intentional redirect, not
+		// a block carrier — writing the block into it would re-duplicate content.
+		// Leave it as a pure `@AGENTS.md` import.
+		if ( name === 'CLAUDE.md' && isClaudeImportStub( targetPath ) ) {
+			logger.info( `${ name }: left as @AGENTS.md import (block lives in AGENTS.md)` );
+			results.push( { name, action: 'import-stub', filePath: targetPath } );
+			continue;
+		}
 		logger.step( `Updating ${ name } with managed seomi-wp-mcp block` );
 		const r = await updateMarkerBlock( targetPath, block );
 		logger.success( `${ name }: ${ r.action }` );
@@ -529,8 +537,16 @@ export async function initCommand( opts ) {
 	//    the project actually uses (and both when both exist, to keep Claude Code
 	//    and other agents on the same page).
 	let agentMdResults = null;
+	let claudeStubRes = null;
 	if ( updateAgentFile && agentMdTargets.length > 0 ) {
 		agentMdResults = await updateAgentMd( cwd, env, agentMdTargets );
+		// Claude Code never reads AGENTS.md — when the block landed there and no
+		// CLAUDE.md exists, drop a one-line CLAUDE.md that imports it so Claude
+		// Code starts with the same instructions (e.g. the prod SSH spec).
+		claudeStubRes = await ensureClaudeImportStub( { cwd } );
+		if ( claudeStubRes.created ) {
+			logger.success( 'Created CLAUDE.md (@AGENTS.md import) — Claude Code now reads AGENTS.md' );
+		}
 	}
 
 	// 6. Install plugin deps on PROD via WP-CLI --ssh (if asked).

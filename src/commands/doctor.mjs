@@ -18,7 +18,7 @@ import { spawn } from 'node:child_process';
 import { logger } from '../lib/logger.mjs';
 import { readMcpJson } from '../lib/claude-mcp.mjs';
 import { ensurePlugins } from '../lib/wp-plugin-installer.mjs';
-import { detectAgentMdTargets } from '../lib/agent-md-target.mjs';
+import { detectAgentMdTargets, isClaudeImportStub } from '../lib/agent-md-target.mjs';
 import { probeRemoteWpCli, ensureWpCliOnSsh } from '../lib/ssh-wp-cli-installer.mjs';
 
 const MU_PLUGIN_HEADER = 'wp-content/mu-plugins/seomi-mcp-abilities/seomi-mcp-abilities.php';
@@ -331,14 +331,25 @@ export async function doctorCommand( opts ) {
 	const inspectTargets = detected.source === 'default' ? [] : detected.targets;
 	logger.info( `[doctor] inspecting managed block in: ${ inspectTargets.length ? inspectTargets.map( ( p ) => p.split( /[\\/]/ ).pop() ).join( ', ' ) : '(none)' }` );
 
+	// Does CLAUDE.md just import AGENTS.md (the intended redirect) rather than
+	// carry its own copy of the block? When so, it has no managed block by
+	// design — skip block inspection for it and report the import as healthy.
+	const claudeIsStub = detected.source === 'both' && isClaudeImportStub( join( cwd, 'CLAUDE.md' ) );
+
 	if ( inspectTargets.length === 0 ) {
 		report.warn( 'No AGENTS.md or CLAUDE.md found — skipping managed-block checks', 'Run `seomi-wp-mcp init`' );
 	} else {
-		if ( detected.source === 'both' ) {
-			report.warn( 'Both AGENTS.md and CLAUDE.md exist — block is synced to both, but Claude Code reads CLAUDE.md and ignores AGENTS.md. Prefer keeping only AGENTS.md.' );
+		if ( detected.source === 'agents' ) {
+			report.warn( 'Only AGENTS.md exists — Claude Code never reads AGENTS.md, so it starts without your instructions (incl. the prod SSH spec).', 'Run `seomi-wp-mcp update` to create a one-line CLAUDE.md that imports it (@AGENTS.md)' );
+		} else if ( claudeIsStub ) {
+			report.pass( 'CLAUDE.md imports AGENTS.md (@AGENTS.md) — Claude Code reads your instructions' );
+		} else if ( detected.source === 'both' ) {
+			report.warn( 'Both AGENTS.md and CLAUDE.md carry the managed block — duplicated content that can drift.', 'Prefer keeping the block in AGENTS.md and replacing CLAUDE.md with a one-line `@AGENTS.md` import' );
 		}
 		for ( const targetPath of inspectTargets ) {
 			const name = targetPath.split( /[\\/]/ ).pop();
+			// The import stub intentionally has no managed block — don't flag it.
+			if ( claudeIsStub && name === 'CLAUDE.md' ) continue;
 			const md = await inspectAgentMdBlock( targetPath );
 			if ( ! md.exists ) {
 				report.warn( `${ name } not found — skipping managed-block checks` );

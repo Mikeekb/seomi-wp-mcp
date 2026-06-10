@@ -16,7 +16,7 @@ import { confirm } from '@inquirer/prompts';
 import { logger } from '../lib/logger.mjs';
 import { insertOrUpdate as updateMarkerBlock } from '../lib/markers.mjs';
 import { renderClaudeMdBlock } from '../lib/claude-md-renderer.mjs';
-import { detectAgentMdTargets } from '../lib/agent-md-target.mjs';
+import { detectAgentMdTargets, ensureClaudeImportStub, isClaudeImportStub } from '../lib/agent-md-target.mjs';
 import { detectThemeOrPluginSlug } from '../lib/project-asset-detector.mjs';
 import { checkForUpdate, performSelfUpdate } from '../lib/self-update.mjs';
 
@@ -206,8 +206,21 @@ export async function updateCommand( opts = {} ) {
 		logger.step( `Regenerating managed block (targets: ${ targetNames })` );
 		for ( const targetPath of targets ) {
 			const name = targetPath.split( /[\\/]/ ).pop();
+			// Don't write the block into a CLAUDE.md that just imports AGENTS.md —
+			// keep it a pure `@AGENTS.md` redirect instead of re-duplicating.
+			if ( name === 'CLAUDE.md' && isClaudeImportStub( targetPath ) ) {
+				logger.info( `${ name }: left as @AGENTS.md import (block lives in AGENTS.md)` );
+				continue;
+			}
 			const r = await updateMarkerBlock( targetPath, block );
 			logger.success( `${ name }: ${ r.action }` );
+		}
+		// Backfill the CLAUDE.md import stub for projects that only have an
+		// AGENTS.md — Claude Code never reads AGENTS.md, so without this it would
+		// start blind. No-op when a CLAUDE.md already exists.
+		const claudeStubRes = await ensureClaudeImportStub( { cwd } );
+		if ( claudeStubRes.created ) {
+			logger.success( 'Created CLAUDE.md (@AGENTS.md import) — Claude Code now reads AGENTS.md' );
 		}
 	}
 
