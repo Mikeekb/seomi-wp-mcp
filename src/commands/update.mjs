@@ -9,7 +9,7 @@
  */
 
 import { existsSync } from 'node:fs';
-import { readFile, cp, rm, mkdir } from 'node:fs/promises';
+import { readFile, rm } from 'node:fs/promises';
 import { join, resolve as resolvePath } from 'node:path';
 import { spawn } from 'node:child_process';
 import { confirm } from '@inquirer/prompts';
@@ -19,6 +19,7 @@ import { renderClaudeMdBlock } from '../lib/claude-md-renderer.mjs';
 import { detectAgentMdTargets, ensureClaudeImportStub, isClaudeImportStub } from '../lib/agent-md-target.mjs';
 import { detectThemeOrPluginSlug } from '../lib/project-asset-detector.mjs';
 import { checkForUpdate, performSelfUpdate } from '../lib/self-update.mjs';
+import { installBundledSkills } from '../lib/skill-installer.mjs';
 
 const MU_PLUGIN_DIR = 'wp-content/mu-plugins/seomi-mcp-abilities';
 const PLUGIN_HEADER_FILE = MU_PLUGIN_DIR + '/seomi-mcp-abilities.php';
@@ -179,15 +180,10 @@ export async function updateCommand( opts = {} ) {
 	const after = await readPluginVersion( cwd );
 	logger.success( `Plugin version after: ${ after ?? '(unknown)' }` );
 
-	// Regenerate skill files (CLI-managed). Wipe first so files removed in a
-	// newer skill version don't linger — `cp --force` overwrites but never
-	// deletes stale entries.
-	logger.step( 'Refreshing aif-wp-mcp skill' );
-	const skillSrc = join( pkgRoot(), 'skills', 'aif-wp-mcp' );
-	const skillDest = join( cwd, '.claude/skills/aif-wp-mcp' );
-	await rm( skillDest, { recursive: true, force: true } );
-	await mkdir( skillDest, { recursive: true } );
-	await cp( skillSrc, skillDest, { recursive: true, force: true } );
+	// Regenerate skill files (CLI-managed). Wipe+recopy semantics live in the
+	// shared installer so init and update stay in sync on the bundle contents.
+	logger.step( 'Refreshing ai-factory skills' );
+	await installBundledSkills( cwd );
 
 	// Regenerate the managed block in whichever agent-instructions file the
 	// project uses (AGENTS.md and/or CLAUDE.md). update runs non-interactively —

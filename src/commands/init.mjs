@@ -17,7 +17,7 @@
 
 import { input, password, select, confirm } from '@inquirer/prompts';
 import { existsSync } from 'node:fs';
-import { readFile, writeFile, mkdir, cp, rm } from 'node:fs/promises';
+import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { join, resolve as resolvePath } from 'node:path';
 import { spawn } from 'node:child_process';
 import { logger } from '../lib/logger.mjs';
@@ -32,6 +32,7 @@ import {
 	composeSshSpec,
 } from '../lib/claude-mcp.mjs';
 import { ensurePlugins } from '../lib/wp-plugin-installer.mjs';
+import { installBundledSkills, BUNDLED_SKILLS } from '../lib/skill-installer.mjs';
 import { ensureSshKey } from '../lib/ssh-key-setup.mjs';
 import { ensureMuPluginOnSsh } from '../lib/ssh-mu-plugin-installer.mjs';
 import { ensureWpCliOnSsh } from '../lib/ssh-wp-cli-installer.mjs';
@@ -317,19 +318,6 @@ async function connectMuPlugin( cwd, mode ) {
 	return { strategy: mode, action: 'unknown-strategy' };
 }
 
-async function installAifSkill( cwd ) {
-	const src = join( pkgRoot(), 'skills', 'aif-wp-mcp' );
-	const dest = join( cwd, '.claude', 'skills', 'aif-wp-mcp' );
-	// Wipe the destination first so files removed in a newer skill version
-	// don't linger on re-install. `cp --force` overwrites but never deletes
-	// stale entries — that breaks update-by-reinstall semantics.
-	await rm( dest, { recursive: true, force: true } );
-	await mkdir( dest, { recursive: true } );
-	await cp( src, dest, { recursive: true, force: true } );
-	logger.success( `Installed aif-wp-mcp skill at .claude/skills/aif-wp-mcp/` );
-	return dest;
-}
-
 /**
  * Write the managed seomi-wp-mcp block into every detected agent-instructions
  * file (AGENTS.md / CLAUDE.md / both). Returns an array of per-target results
@@ -464,7 +452,7 @@ export async function initCommand( opts ) {
 		: false;
 
 	const installSkill = await confirm( {
-		message: 'Install the aif-wp-mcp skill into .claude/skills/ for ai-factory?',
+		message: `Install ai-factory skills into .claude/skills/ (${ BUNDLED_SKILLS.join( ', ' ) })?`,
 		default: true,
 	} );
 
@@ -527,10 +515,10 @@ export async function initCommand( opts ) {
 		muRes = await connectMuPlugin( cwd, muMode );
 	}
 
-	// 4. Drop aif skill
+	// 4. Drop ai-factory skills (aif-wp-mcp + WP helpers)
 	let skillRes = null;
 	if ( installSkill ) {
-		skillRes = await installAifSkill( cwd );
+		skillRes = await installBundledSkills( cwd );
 	}
 
 	// 5. Update agent-instructions file(s) — AGENTS.md and/or CLAUDE.md, whichever
@@ -649,7 +637,7 @@ export async function initCommand( opts ) {
 		`  Remote WP-CLI (prod)     — ${ prodWpCliRes ? prodWpCliRes.action : 'skipped' }`,
 		`  mu-plugin (prod)         — ${ prodMuRes ? prodMuRes.action : 'skipped' }`,
 		sshKeyLine,
-		`  aif-wp-mcp skill         — ${ skillRes ? 'installed' : 'skipped' }`,
+		`  ai-factory skills        — ${ skillRes ? skillRes.map( ( r ) => r.slug + ':' + r.action ).join( ', ' ) : 'skipped' }`,
 		`  Agent-md block           — ${ agentMdResults ? agentMdResults.map( ( r ) => r.name + ':' + r.action ).join( ', ' ) : 'skipped' }`,
 		`  .mcp.json (local server) — ${ localRes ? localRes.action + ' (' + env.WP_LOCAL_MCP_SERVER + ')' : 'skipped (no local)' }`,
 		`  .mcp.json (prod server)  — ${ prodRes ? prodRes.action + ' (' + env.WP_PROD_MCP_SERVER + ')' : 'skipped' }`,
