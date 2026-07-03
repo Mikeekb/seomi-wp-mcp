@@ -20,6 +20,8 @@ import { readMcpJson } from '../lib/claude-mcp.mjs';
 import { ensurePlugins } from '../lib/wp-plugin-installer.mjs';
 import { detectAgentMdTargets, isClaudeImportStub } from '../lib/agent-md-target.mjs';
 import { probeRemoteWpCli, ensureWpCliOnSsh } from '../lib/ssh-wp-cli-installer.mjs';
+import { detectPython } from '../lib/python-detector.mjs';
+import { detectMetrikaState, setupMetrika } from '../lib/metrika-setup.mjs';
 
 const MU_PLUGIN_HEADER = 'wp-content/mu-plugins/seomi-mcp-abilities/seomi-mcp-abilities.php';
 const MU_LOADER_FILE = 'wp-content/mu-plugins/mcp-abilities.php';
@@ -262,8 +264,9 @@ export async function doctorCommand( opts ) {
 		report.pass( `mu-plugin present, version ${ m ? m[1] : 'unknown' }` );
 	}
 
-	// 3. WP REST reachable
-	if ( env ) {
+	// 3. WP REST reachable (only when a local WP URL is configured — a
+	//    Metrica-only project has no WP_LOCAL_URL and must not crash here).
+	if ( env && env.WP_LOCAL_URL ) {
 		const probeUrl = new URL( '/wp-json/', env.WP_LOCAL_URL ).toString();
 		const probe = await httpProbe( probeUrl, env.WP_LOCAL_USER, env.WP_LOCAL_APP_PASSWORD );
 		if ( probe.ok ) {
@@ -320,6 +323,39 @@ export async function doctorCommand( opts ) {
 			}
 		} catch ( err ) {
 			report.fail( `.mcp.json is malformed`, err.message );
+		}
+	}
+
+	// 5.5. Yandex Metrica (optional). Only reported when the project has any
+	//      Metrica footprint (creds, venv, or .mcp.json entry) — a project that
+	//      never opted in shouldn't be nagged. All rows are WARN (optional
+	//      feature), never FAIL.
+	const metrikaState = await detectMetrikaState( cwd );
+	const anyMetrika = metrikaState.hasEnv || metrikaState.hasVenv || metrikaState.hasMcp;
+	if ( anyMetrika ) {
+		if ( metrikaState.hasEnv ) {
+			report.pass( 'Yandex Metrica creds present (METRIKA_OAUTH_TOKEN, METRIKA_COUNTER_ID)' );
+		} else {
+			report.warn( 'Yandex Metrica: METRIKA_OAUTH_TOKEN / METRIKA_COUNTER_ID missing in .claude/.env', 'Run `seomi-wp-mcp update --metrika` or `init`' );
+		}
+
+		const metrikaPython = detectPython();
+		if ( metrikaPython ) {
+			report.pass( `Python ${ metrikaPython.version } available for the Metrica MCP server` );
+		} else {
+			report.warn( 'Python >= 3.12 not found — the Metrica MCP server cannot run', 'Install Python 3.12+, then run `seomi-wp-mcp doctor --fix`' );
+		}
+
+		if ( metrikaState.hasVenv ) {
+			report.pass( 'Yandex Metrica MCP venv is built (.claude/mcp-servers/yandex-metrika/.venv)' );
+		} else {
+			report.warn( 'Yandex Metrica MCP venv not built', 'Run `seomi-wp-mcp doctor --fix` (needs Python 3.12+)' );
+		}
+
+		if ( metrikaState.hasMcp ) {
+			report.pass( 'Yandex Metrica MCP registered in .mcp.json (yandex-metrika)' );
+		} else {
+			report.warn( 'Yandex Metrica MCP not registered in .mcp.json', 'Run `seomi-wp-mcp doctor --fix`' );
 		}
 	}
 
@@ -438,6 +474,21 @@ export async function doctorCommand( opts ) {
 		if ( wpcliFix.manualSnippet ) {
 			process.stdout.write( wpcliFix.manualSnippet + '\n' );
 		}
+	}
+
+	// 8.6. --fix: finish the Metrica MCP install when creds already exist but the
+	//      venv/registration is incomplete. Credentials are never invented — if
+	//      they're missing, the user must run init/update to provide the token.
+	if ( opts.fix && metrikaState.hasEnv && ! metrikaState.configured ) {
+		if ( ! detectPython() ) {
+			logger.warn( 'Cannot fix Metrica: Python >= 3.12 not found. Install it and re-run `seomi-wp-mcp doctor --fix`.' );
+		} else {
+			logger.step( 'Auto-fix: installing/registering the Yandex Metrica MCP server' );
+			const metrikaFix = await setupMetrika( cwd, {} );
+			process.stdout.write( `  metrica server: ${ metrikaFix.installRes.action }${ metrikaFix.mcpRes ? ', mcp:' + metrikaFix.mcpRes.action : '' }\n` );
+		}
+	} else if ( opts.fix && ! metrikaState.hasEnv && ( metrikaState.hasVenv || metrikaState.hasMcp ) ) {
+		logger.warn( 'Metrica MCP present but credentials are missing — run `seomi-wp-mcp update --metrika` to add METRIKA_OAUTH_TOKEN / METRIKA_COUNTER_ID.' );
 	}
 
 	report.print();

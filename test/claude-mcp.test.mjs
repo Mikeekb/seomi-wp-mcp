@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
-import { buildStdioLocalConfig, buildStdioSshConfig, composeSshSpec } from '../src/lib/claude-mcp.mjs';
+import { buildStdioLocalConfig, buildStdioSshConfig, composeSshSpec, buildMetrikaMcpConfig } from '../src/lib/claude-mcp.mjs';
 
 test( 'buildStdioLocalConfig: appends --url when siteUrl is given', () => {
 	const cfg = buildStdioLocalConfig( {
@@ -58,4 +58,21 @@ test( 'composeSshSpec: assembles user@host:port/path', () => {
 		composeSshSpec( { sshUser: 'c7006', sshHost: '91.226.81.214', sshPort: 22, wpRoot: '/home/c7006/www' } ),
 		'c7006@91.226.81.214:22/home/c7006/www'
 	);
+} );
+
+test( 'buildMetrikaMcpConfig: windows venv path, no secrets, stdio', () => {
+	const cfg = buildMetrikaMcpConfig( { platform: 'win32' } );
+	assert.equal( cfg.command, '.claude/mcp-servers/yandex-metrika/.venv/Scripts/python.exe' );
+	assert.deepEqual( cfg.args, [ '-m', 'seomi_metrika.server' ] );
+	assert.equal( cfg.type, 'stdio' );
+	// Only LOG_LEVEL in env — never the OAuth token (this file is committed).
+	assert.deepEqual( Object.keys( cfg.env ), [ 'LOG_LEVEL' ] );
+	const serialized = JSON.stringify( cfg ).toLowerCase();
+	assert.ok( ! serialized.includes( 'token' ), 'config must not carry any token' );
+	assert.ok( ! serialized.includes( 'oauth' ), 'config must not carry oauth secrets' );
+} );
+
+test( 'buildMetrikaMcpConfig: posix venv path', () => {
+	const cfg = buildMetrikaMcpConfig( { platform: 'linux' } );
+	assert.equal( cfg.command, '.claude/mcp-servers/yandex-metrika/.venv/bin/python' );
 } );

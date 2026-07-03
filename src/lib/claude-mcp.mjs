@@ -97,6 +97,38 @@ export function buildStdioSshConfig( { wpCliPharPath, sshSpec, user, siteUrl, mc
 }
 
 /**
+ * Build the `.mcp.json` entry for the bundled Yandex Metrika MCP server.
+ *
+ * The server is a Python package installed into a project-local venv at
+ * `.claude/mcp-servers/yandex-metrika/.venv`. The command is a project-relative
+ * path to that venv's interpreter (forward slashes — valid on Windows too and
+ * clean in JSON), invoked as `python -m seomi_metrika.server`.
+ *
+ * Secrets policy: `.mcp.json` is committed to git, so the OAuth token is NEVER
+ * placed here. The server reads `METRIKA_OAUTH_TOKEN` / `METRIKA_COUNTER_ID`
+ * from `.claude/.env` (gitignored). Only the non-sensitive `LOG_LEVEL` is
+ * passed via the env block.
+ *
+ * Claude launches MCP servers with cwd = project root, so both the relative
+ * command path and the server's `.claude/.env` lookup resolve correctly.
+ *
+ * @param {object} [opts]
+ * @param {string} [opts.platform=process.platform]
+ * @param {string} [opts.logLevel='INFO']
+ */
+export function buildMetrikaMcpConfig( { platform = process.platform, logLevel = 'INFO' } = {} ) {
+	const venvPython = platform === 'win32'
+		? '.claude/mcp-servers/yandex-metrika/.venv/Scripts/python.exe'
+		: '.claude/mcp-servers/yandex-metrika/.venv/bin/python';
+	return {
+		command: venvPython,
+		args: [ '-m', 'seomi_metrika.server' ],
+		env: { LOG_LEVEL: logLevel },
+		type: 'stdio',
+	};
+}
+
+/**
  * Compose the WP-CLI `--ssh=` spec from individual fields.
  *   user@host[:port][/path]
  */

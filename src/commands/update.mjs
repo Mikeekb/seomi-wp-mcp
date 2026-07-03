@@ -20,6 +20,7 @@ import { detectAgentMdTargets, ensureClaudeImportStub, isClaudeImportStub } from
 import { detectThemeOrPluginSlug } from '../lib/project-asset-detector.mjs';
 import { checkForUpdate, performSelfUpdate } from '../lib/self-update.mjs';
 import { installBundledSkills } from '../lib/skill-installer.mjs';
+import { detectMetrikaState, askMetrikaCredentials, setupMetrika } from '../lib/metrika-setup.mjs';
 
 const MU_PLUGIN_DIR = 'wp-content/mu-plugins/seomi-mcp-abilities';
 const PLUGIN_HEADER_FILE = MU_PLUGIN_DIR + '/seomi-mcp-abilities.php';
@@ -127,6 +128,49 @@ async function runSelfUpdateGate() {
 	return { stop: true, code };
 }
 
+/**
+ * Metrica install/refresh during `update`. Encapsulates the doustanovka
+ * decision tree so `updateCommand` stays a linear orchestrator.
+ */
+async function maybeSetupMetrikaOnUpdate( cwd, opts ) {
+	if ( opts[ 'no-metrika' ] ) {
+		logger.info( 'Yandex Metrica setup skipped (--no-metrika).' );
+		return;
+	}
+
+	const state = await detectMetrikaState( cwd );
+
+	if ( state.configured ) {
+		// Fully set up already — just refresh the server source + venv and make
+		// sure the .mcp.json entry is current. Credentials untouched, no prompts.
+		logger.step( 'Refreshing Yandex Metrica MCP server' );
+		await setupMetrika( cwd, {} );
+		return;
+	}
+
+	if ( state.hasEnv ) {
+		// Credentials exist but the server/registration is incomplete (e.g. a
+		// half-finished setup, or creds added by hand) — finish it without
+		// re-asking for the token.
+		logger.step( 'Completing Yandex Metrica setup (credentials already present)' );
+		await setupMetrika( cwd, {} );
+		return;
+	}
+
+	// Nothing configured yet. Offer the доустановка.
+	const interactive = !! process.stdin.isTTY;
+	if ( opts.metrika || interactive ) {
+		const creds = await askMetrikaCredentials( { assumeYes: !! opts.metrika } );
+		if ( creds.enabled ) {
+			logger.step( 'Installing Yandex Metrica MCP server' );
+			await setupMetrika( cwd, { env: creds.env } );
+		}
+		return;
+	}
+
+	logger.info( 'Yandex Metrica not configured. Add it with: seomi-wp-mcp update --metrika (or seomi-wp-mcp init).' );
+}
+
 export async function updateCommand( opts = {} ) {
 	const cwd = process.cwd();
 	logger.step( `seomi-wp-mcp update — cwd: ${ cwd }` );
@@ -184,6 +228,15 @@ export async function updateCommand( opts = {} ) {
 	// shared installer so init and update stay in sync on the bundle contents.
 	logger.step( 'Refreshing ai-factory skills' );
 	await installBundledSkills( cwd );
+
+	// Yandex Metrica: this is the "доустановка" path — projects created with an
+	// older seomi-wp-mcp gain the Metrica integration here. Behaviour depends on
+	// current state and flags:
+	//   --no-metrika        → skip entirely
+	//   already configured  → refresh the server + venv (no prompts)
+	//   creds present only  → finish the install non-interactively (reuse creds)
+	//   nothing yet         → offer doustanovka (interactive, or forced by --metrika)
+	await maybeSetupMetrikaOnUpdate( cwd, opts );
 
 	// Regenerate the managed block in whichever agent-instructions file the
 	// project uses (AGENTS.md and/or CLAUDE.md). update runs non-interactively —

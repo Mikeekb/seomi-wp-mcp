@@ -19,11 +19,16 @@ Commands:
                  MCP servers in Claude, drops the aif-wp-mcp skill, updates CLAUDE.md.
   update         Check npm for a newer seomi-wp-mcp, self-update if available,
                  then pull latest mu-plugin version and regenerate managed
-                 sections. Use --no-self-update to skip the npm version check.
-  doctor         Verify the local setup (env, mu-plugin, MCP servers, plugin deps).
+                 sections. Also installs the Yandex Metrica MCP into projects
+                 set up with an older version (доустановка). Use
+                 --no-self-update to skip the npm version check.
+  doctor         Verify the local setup (env, mu-plugin, MCP servers, plugin
+                 deps, Yandex Metrica). --fix installs what's missing.
 
 Global options:
   --verbose      Enable debug logging (DEBUG level).
+  --metrika      Force Yandex Metrica setup (skip the confirm) on init/update.
+  --no-metrika   Skip Yandex Metrica setup on init/update.
   --help, -h     Show this help.
   --version, -v  Print version.
 
@@ -63,6 +68,7 @@ async function main() {
 			target: { type: 'string', default: 'local' },
 			fix: { type: 'boolean', default: false },
 			'self-update': { type: 'boolean', default: true },
+			metrika: { type: 'boolean', default: false },
 		},
 		strict: false,
 		allowPositionals: true,
@@ -77,6 +83,8 @@ async function main() {
 	if ( values[ 'no-self-update' ] ) {
 		values[ 'self-update' ] = false;
 	}
+	// `--no-metrika` arrives as its own `no-metrika` key; keep it as a distinct
+	// flag (init/update read `opts['no-metrika']` to skip Metrica setup).
 
 	const opts = { ...values, positionals };
 

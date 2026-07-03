@@ -33,6 +33,7 @@ import {
 } from '../lib/claude-mcp.mjs';
 import { ensurePlugins } from '../lib/wp-plugin-installer.mjs';
 import { installBundledSkills, BUNDLED_SKILLS } from '../lib/skill-installer.mjs';
+import { askMetrikaCredentials, setupMetrika } from '../lib/metrika-setup.mjs';
 import { ensureSshKey } from '../lib/ssh-key-setup.mjs';
 import { ensureMuPluginOnSsh } from '../lib/ssh-mu-plugin-installer.mjs';
 import { ensureWpCliOnSsh } from '../lib/ssh-wp-cli-installer.mjs';
@@ -456,6 +457,13 @@ export async function initCommand( opts ) {
 		default: true,
 	} );
 
+	// Optional Yandex Metrica integration (independent of WordPress). Collect
+	// credentials now; the actual install runs in the execution phase below.
+	// --no-metrika skips the prompt; --metrika skips the leading confirm.
+	const metrikaCreds = opts[ 'no-metrika' ]
+		? { enabled: false }
+		: await askMetrikaCredentials( { assumeYes: !! opts.metrika } );
+
 	// Detect which agent-instructions file(s) the project actually uses, so the
 	// confirm question references the real target(s) instead of hard-coded
 	// CLAUDE.md. If neither file exists, fall back to an interactive picker
@@ -624,6 +632,15 @@ export async function initCommand( opts ) {
 		logger.warn( 'Prod URL given but no SSH config — skipping prod MCP server registration. (Stdio over SSH is the only supported prod transport currently.)' );
 	}
 
+	// 7b. Yandex Metrica: write creds, install the Python MCP server + venv,
+	//     register it in .mcp.json. Best-effort — a missing Python is a warn,
+	//     not a failure (the skill still installed; doctor --fix finishes later).
+	let metrikaRes = null;
+	if ( metrikaCreds.enabled ) {
+		logger.step( 'Setting up Yandex Metrica MCP server' );
+		metrikaRes = await setupMetrika( cwd, { env: metrikaCreds.env } );
+	}
+
 	// 8. Summary
 	logger.step( 'Summary' );
 	const sshKeyLine = sshKeyRes
@@ -641,6 +658,7 @@ export async function initCommand( opts ) {
 		`  Agent-md block           — ${ agentMdResults ? agentMdResults.map( ( r ) => r.name + ':' + r.action ).join( ', ' ) : 'skipped' }`,
 		`  .mcp.json (local server) — ${ localRes ? localRes.action + ' (' + env.WP_LOCAL_MCP_SERVER + ')' : 'skipped (no local)' }`,
 		`  .mcp.json (prod server)  — ${ prodRes ? prodRes.action + ' (' + env.WP_PROD_MCP_SERVER + ')' : 'skipped' }`,
+		`  Yandex Metrica           — ${ metrikaRes ? metrikaRes.installRes.action + ( metrikaRes.mcpRes ? ', mcp:' + metrikaRes.mcpRes.action : ', mcp:deferred' ) : 'skipped' }`,
 	];
 	process.stdout.write( '\n' + summary.join( '\n' ) + '\n\n' );
 
