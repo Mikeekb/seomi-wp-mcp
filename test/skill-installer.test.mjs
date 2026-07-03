@@ -36,7 +36,7 @@ async function makeFakeRoot( slugs ) {
 }
 
 test( 'BUNDLED_SKILLS: composition and order', () => {
-	assert.deepEqual( BUNDLED_SKILLS, [ 'aif-wp-mcp', 'acf-fields', 'wp-forms' ] );
+	assert.deepEqual( BUNDLED_SKILLS, [ 'aif-wp-mcp', 'acf-fields', 'wp-forms', 'yandex-metrika' ] );
 } );
 
 test( 'installs every slug and copies its files', async () => {

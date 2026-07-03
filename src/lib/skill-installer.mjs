@@ -26,7 +26,7 @@ import { logger } from './logger.mjs';
  * The CLI-managed skill bundle, in install order. `aif-wp-mcp` stays first
  * (it is the primary ai-factory skill); the WP-specific helpers follow.
  */
-export const BUNDLED_SKILLS = [ 'aif-wp-mcp', 'acf-fields', 'wp-forms' ];
+export const BUNDLED_SKILLS = [ 'aif-wp-mcp', 'acf-fields', 'wp-forms', 'yandex-metrika' ];
 
 /**
  * Resolve the package root from `src/lib/`. `new URL( '../..', … )` walks up
