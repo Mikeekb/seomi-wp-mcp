@@ -20,6 +20,7 @@ That single `init` will:
 6. Insert a managed block into the project's main agent-instructions file (`AGENTS.md` or `CLAUDE.md`) between `<!-- seomi-wp-mcp:start -->` markers — detected automatically; if both files exist, the block is kept in sync in both. If neither exists, `init` asks which to create (default: `AGENTS.md`, the universal standard).
 7. Write **project-scope** MCP server entries to `.mcp.json` in the project root (so each project sees its own `wordpress-local`/`wordpress-prod`, no cross-project leakage). Local server uses stdio via WP-CLI `mcp-adapter serve`; prod uses the same transport but with WP-CLI `--ssh=` so commands run on the production server.
 8. Embed **deploy-over-SSH recipes** in the managed `AGENTS.md`/`CLAUDE.md` block — concrete `scp`/`rsync`/`ssh` commands prefilled with the actual host, port, WP root, and detected theme/plugin slug — so AI agents reach for the SSH channel before suggesting PhpStorm UI deploy. Includes a "MCP servers in this project" section that lists project-scope vs user-scope servers and a short playbook for adding a new MCP server (`claude mcp add ... --scope project|user`).
+9. **Optionally set up the Yandex Metrica integration** — if you opt in, `init` asks for an OAuth token + counter id, installs the bundled `seomi-metrika-mcp` Python server into `.claude/mcp-servers/yandex-metrika/` (with its own `.venv`), registers the `yandex-metrika` MCP server in `.mcp.json`, and drops the `yandex-metrika` skill. Fully optional and independent of WordPress — see [Yandex Metrica integration](#yandex-metrica-integration).
 
 Re-run any time — it's **idempotent**. Nothing duplicates, nothing gets clobbered.
 
@@ -43,9 +44,10 @@ That's ~30 minutes of error-prone manual work, repeated for every WP project. `s
 | Command                              | What it does                                                           |
 |--------------------------------------|------------------------------------------------------------------------|
 | `seomi-wp-mcp init`                  | Interactive first-time setup (see above)                               |
-| `seomi-wp-mcp update`                | Pull the latest mu-plugin and regenerate the managed block in `AGENTS.md`/`CLAUDE.md` |
-| `seomi-wp-mcp doctor`                | Diagnose env, mu-plugin presence, MCP server registration, plugin deps |
-| `seomi-wp-mcp doctor --fix`          | Auto-install/activate Abilities API + MCP Adapter; install remote WP-CLI on prod if missing |
+| `seomi-wp-mcp update`                | Pull the latest mu-plugin, regenerate the managed block in `AGENTS.md`/`CLAUDE.md`, and back-install the Yandex Metrica integration into projects created with an older version |
+| `seomi-wp-mcp doctor`                | Diagnose env, mu-plugin presence, MCP server registration, plugin deps, and Metrica health (creds, Python 3.12+, venv, `yandex-metrika` in `.mcp.json`) |
+| `seomi-wp-mcp doctor --fix`          | Auto-install/activate Abilities API + MCP Adapter; install remote WP-CLI on prod if missing; finish a deferred Metrica install when creds already exist |
+| `seomi-wp-mcp init --metrika` / `--no-metrika` | Force the Yandex Metrica setup (skip the confirm) / skip it entirely — also valid on `update` |
 | `seomi-wp-mcp --verbose <command>`   | Add debug-level logging to any command                                 |
 | `seomi-wp-mcp --version`             | Print version                                                          |
 
@@ -55,6 +57,7 @@ That's ~30 minutes of error-prone manual work, repeated for every WP project. `s
 - **PHP 8.0+** + **WordPress 6.4+** on the target project.
 - **WP-CLI** (recommended) for the auto-install fallback chain.
 - **Claude Code CLI** for `claude mcp add` registration (without it, the CLI just prints copy-paste commands instead of running them).
+- **Python 3.12+** — only if you use the Yandex Metrica integration. If it's missing, the skill + credentials still install and the MCP server build is deferred (finish it later with `seomi-wp-mcp doctor --fix`).
 
 ## SSH access to production
 
@@ -126,6 +129,55 @@ This installs only the `aif-wp-mcp` skill (from `skills/aif-wp-mcp/` in this rep
 
 The skill lives in its own folder under `.claude/skills/aif-wp-mcp/`, separate from the `aif-*` skills shipped by ai-factory, so updates to `ai-factory` never overwrite it.
 
+## Yandex Metrica integration
+
+`init` can optionally wire the project to **Yandex Metrica (Яндекс.Метрика)** so AI agents can pull analytics, manage goals, and work with audience segments through MCP. This is **fully optional and independent of WordPress** — you can add it to a plain project too.
+
+It ships as a bundled Python MCP server (`seomi-metrika-mcp`, module `seomi_metrika`, FastMCP + httpx + pydantic + structlog). On setup the server is copied into the client project at `.claude/mcp-servers/yandex-metrika/`, built into its own Python virtualenv (`.venv`), and registered in `.mcp.json` under the server name `yandex-metrika`. A `yandex-metrika` skill is also dropped into `.claude/skills/`.
+
+### What it does
+
+- **Goals** — create, edit, and delete Metrica goals (Management API).
+- **Analytics reports** — run reports and read counters, goals, and Yandex.Direct campaigns.
+- **Save reports locally** — run a report and persist it to `.ai-factory/metrika-reports/<date>_<slug>.json` + `.md`.
+- **Audience segments** — list, create, edit, and delete segments (Management API).
+
+### Tools (13, all prefixed `yandex_metrika_`)
+
+| Group | Tools |
+|-------|-------|
+| Read / analytics | `get_counter_info`, `list_counters`, `list_goals`, `get_report`, `list_direct_campaigns` |
+| Goals (write) | `create_goal`, `update_goal`, `delete_goal` |
+| Segments (audience) | `list_segments`, `create_segment`, `update_segment`, `delete_segment` |
+| Reports | `save_report` (runs a report and saves `.json` + `.md` under `.ai-factory/metrika-reports/`) |
+
+### Credentials
+
+Metrica credentials live in `.claude/.env` (gitignored) — **never** in `.mcp.json` (which is committed):
+
+| Key                   | Purpose                                                                 |
+|-----------------------|-------------------------------------------------------------------------|
+| `METRIKA_OAUTH_TOKEN` | OAuth token from https://oauth.yandex.ru/. `metrika:read` is enough for reports; `metrika:write` is required to create/edit goals & segments. |
+| `METRIKA_COUNTER_ID`  | Counter id — found in the Metrica UI (Settings → counter number). Comma-separate multiple counters, e.g. `43286099,46188792`. |
+
+The OAuth token is only ever read from `.claude/.env`; it is never written into `.mcp.json`, so committing `.mcp.json` never leaks it.
+
+### Adding it to an existing / older project
+
+If the project was created with an older version of `seomi-wp-mcp` (before Metrica existed), back-install it without a full re-init:
+
+```
+seomi-wp-mcp update            # offers the Metrica setup interactively; finishes an incomplete install non-interactively
+seomi-wp-mcp update --metrika  # force the Metrica setup, skipping the confirm
+seomi-wp-mcp doctor --fix      # finish a deferred install when creds already exist (never invents credentials)
+```
+
+If Metrica is already configured, `update` just refreshes the server.
+
+### Python 3.12+ requirement & graceful degradation
+
+The server needs **Python 3.12+** on the client machine, but only if you use Metrica. If Python is absent at setup time, the skill and credentials still install and the venv build is deferred with a warning — install Python 3.12+ later and run `seomi-wp-mcp doctor --fix` to finish. `doctor` reports Metrica health (creds present, Python 3.12+ available, venv built, `yandex-metrika` in `.mcp.json`).
+
 ## Configuration
 
 All credentials live in `.claude/.env` (which is gitignored). Keys managed by this CLI:
@@ -138,6 +190,8 @@ All credentials live in `.claude/.env` (which is gitignored). Keys managed by th
 | `WP_LOCAL_MCP_SERVER`     | Name of the MCP server registered in Claude         |
 | `WP_PROD_URL` / `_USER` / `_APP_PASSWORD` / `_MCP_SERVER` | Same for production         |
 | `WP_DEPS_REF`             | Optional pin for `abilities-api` / `mcp-adapter` (default `trunk`) |
+| `METRIKA_OAUTH_TOKEN`     | Yandex Metrica OAuth token (from https://oauth.yandex.ru/) — `metrika:write` scope for goals/segments |
+| `METRIKA_COUNTER_ID`      | Yandex Metrica counter id(s), comma-separated for multiple (e.g. `43286099,46188792`) |
 
 Other keys (added by you, by `deploy-prod`, etc.) are preserved across re-runs.
 
@@ -180,10 +234,15 @@ bin/                    Entry point
 src/
   commands/             init, update, doctor
   lib/                  logger, markers, env-writer, claude-mcp, wp-plugin-installer,
-                        ssh-key-setup, ssh-mu-plugin-installer
+                        ssh-key-setup, ssh-mu-plugin-installer,
+                        python-detector, metrika-mcp-installer, metrika-setup
 skills/
   aif-wp-mcp/           Standard-path skill (npx skills compatible);
                         also copied into .claude/skills/ on init by our CLI
+  yandex-metrika/       Yandex Metrica skill (bundled, copied into .claude/skills/)
+mcp-servers/
+  yandex-metrika/       Bundled Python MCP server (seomi-metrika-mcp), installed
+                        into .claude/mcp-servers/ with its own .venv
 templates/
   claude-md-block.md    Managed block injected into AGENTS.md / CLAUDE.md
   claude-dotenv/        Reference .env.example

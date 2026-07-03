@@ -127,7 +127,90 @@ To attempt an auto-fix of remote WP-CLI without re-running full `init`:
 seomi-wp-mcp doctor --fix
 ```
 
+## Yandex Metrica
+
+The Metrica integration is optional and independent of WordPress. It installs a
+bundled Python MCP server (`seomi-metrika-mcp`) into
+`.claude/mcp-servers/yandex-metrika/` with its own `.venv`, registers the
+`yandex-metrika` server in `.mcp.json`, and reads credentials from
+`.claude/.env`. Diagnose with `seomi-wp-mcp doctor` (Metrica health rows) and
+auto-fix a deferred install with `seomi-wp-mcp doctor --fix`.
+
+### Python 3.12+ not found
+
+**Symptom.** `init`/`update` warned that the Metrica MCP server build was
+deferred, or `doctor` reports Python 3.12+ is missing / the venv is not built.
+
+**Why.** The Python server needs **Python 3.12+** on the client machine. When
+it's absent, the skill + credentials still install, but the venv build is
+deferred rather than failing the whole run.
+
+**Fix.** Install Python 3.12+ (make sure `python`/`python3` resolves to it),
+then finish the install:
+
+```bash
+seomi-wp-mcp doctor --fix
+```
+
+`doctor --fix` completes the install only when the credentials already exist —
+it never invents credentials.
+
+### venv build failed
+
+**Symptom.** `doctor` shows the `yandex-metrika` venv as not built even though
+Python 3.12+ is present.
+
+**Fix.** Re-run `seomi-wp-mcp doctor --fix`. The installer builds the venv via
+`uv` and falls back to `pip`. If it still fails, check that the detected Python
+is really 3.12+ and that outbound network access to PyPI is available, then
+re-run.
+
+### OAuth token lacks write permission
+
+**Symptom.** Reports work, but `yandex_metrika_create_goal` /
+`update_goal` / `delete_goal` (or the segment tools) return an `AUTH` error.
+
+**Why.** Reads only need the `metrika:read` scope, but creating/editing goals
+and segments goes through the Management API and requires `metrika:write`.
+
+**Fix.** Issue a new OAuth token at https://oauth.yandex.ru/ with the
+`metrika:write` scope and update `METRIKA_OAUTH_TOKEN` in `.claude/.env`. The
+token lives only in `.claude/.env`, never in `.mcp.json`.
+
+### Rate limits (HTTP 420 / 429 → `RATE_LIMIT`)
+
+**Symptom.** Tool calls return a `RATE_LIMIT` error; the underlying HTTP status
+is 420 or 429.
+
+**Fix.** You've hit Yandex Metrica's API quota. Back off and retry after a
+short pause; avoid tight loops of report/goal calls.
+
+### Where to get the credentials
+
+- **`METRIKA_OAUTH_TOKEN`** — https://oauth.yandex.ru/ (grant `metrika:read`
+  for reports, `metrika:write` for goals/segments).
+- **`METRIKA_COUNTER_ID`** — the counter number in the Metrica web UI
+  (Settings → counter number). Comma-separate multiple counters, e.g.
+  `43286099,46188792`.
+
+### Segments created via the API are not visible in the Metrica web UI
+
+This is a Yandex Metrica **API limitation**, not a bug in the integration.
+Segments created through the Management API may not appear in the Metrica web
+interface. Use the API tools (`yandex_metrika_list_segments`, etc.) to manage
+them.
+
+### Multi-counter ambiguity
+
+**Symptom.** With several counters in `METRIKA_COUNTER_ID`
+(e.g. `43286099,46188792`), a tool call is ambiguous or targets the wrong
+counter.
+
+**Fix.** Pass an explicit `counter_id` argument to the tool when multiple
+counters are configured, so the call is unambiguous.
+
 ## See Also
 
+- [README — Yandex Metrica integration](../README.md#yandex-metrica-integration) — what it does, tools, credentials, and setup.
 - [README — Production WP-CLI auto-install (0.1.16+)](../README.md#production-wp-cli-auto-install-0116) — full strategy chain description.
 - [README — SSH access to production](../README.md#ssh-access-to-production) — ssh key setup that must succeed before any of the above runs.
