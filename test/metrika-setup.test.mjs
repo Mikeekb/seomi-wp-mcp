@@ -4,7 +4,7 @@ import { mkdtemp, rm, mkdir, writeFile, readFile } from 'node:fs/promises';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
-import { detectMetrikaState, setupMetrika, METRIKA_MCP_SERVER } from '../src/lib/metrika-setup.mjs';
+import { detectMetrikaState, setupMetrika, metrikaAuthorizeUrl, METRIKA_MCP_SERVER } from '../src/lib/metrika-setup.mjs';
 import { venvPythonPath, CLIENT_SERVER_REL } from '../src/lib/metrika-mcp-installer.mjs';
 
 /**
@@ -117,6 +117,26 @@ test( 'detectMetrikaState: reports partial and full configuration', async () => 
 	} finally {
 		await rm( cwd, { recursive: true, force: true } );
 	}
+} );
+
+test( 'metrikaAuthorizeUrl: builds implicit-flow url, trims and encodes client id', () => {
+	// Happy path: a plain client id lands verbatim on the token flow endpoint.
+	assert.equal(
+		metrikaAuthorizeUrl( 'abc123' ),
+		'https://oauth.yandex.ru/authorize?response_type=token&client_id=abc123'
+	);
+	// Surrounding whitespace (easy to paste) is trimmed, not encoded.
+	assert.equal(
+		metrikaAuthorizeUrl( '  abc123  ' ),
+		'https://oauth.yandex.ru/authorize?response_type=token&client_id=abc123'
+	);
+	// Odd characters get percent-encoded so the URL stays valid.
+	assert.match( metrikaAuthorizeUrl( 'a b&c' ), /client_id=a%20b%26c$/ );
+	// Nullish input degrades to an empty client_id instead of throwing.
+	assert.equal(
+		metrikaAuthorizeUrl( undefined ),
+		'https://oauth.yandex.ru/authorize?response_type=token&client_id='
+	);
 } );
 
 test( 'detectMetrikaState: empty env value is not "configured"', async () => {
