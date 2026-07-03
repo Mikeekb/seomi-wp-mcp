@@ -1,0 +1,6 @@
+# Локальное окружение и кеши Python — не коммитим и не публикуем в npm-пакете.
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
