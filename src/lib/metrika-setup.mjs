@@ -27,6 +27,15 @@ import { installMetrikaMcp, venvPythonPath, CLIENT_SERVER_REL } from './metrika-
 export const METRIKA_MCP_SERVER = 'yandex-metrika';
 
 /**
+ * Management API endpoint used as a token liveness probe — listing counters is
+ * the cheapest call any valid token is allowed to make.
+ */
+const METRIKA_COUNTERS_URL = 'https://api-metrika.yandex.net/management/v1/counters';
+
+/** Give up on the probe rather than hanging the installer on a dead network. */
+const TOKEN_PROBE_TIMEOUT_MS = 8000;
+
+/**
  * Build the Yandex OAuth implicit-flow ("token") authorize URL for a Client ID.
  *
  * The Metrika cabinet only exposes Client ID / Client Secret — not a ready-made
@@ -42,6 +51,28 @@ export function metrikaAuthorizeUrl( clientId ) {
 }
 
 /**
+ * Pick the argv that hands a URL to the OS default browser.
+ *
+ * Windows deliberately does NOT go through `cmd /c start`. `cmd.exe` treats `&`
+ * as a command separator and the authorize URL always contains one
+ * (`…?response_type=token&client_id=…`), so an unquoted URL reached the browser
+ * truncated right before `client_id` — Yandex then had no idea which app was
+ * asking and never showed the consent screen. `explorer.exe` receives the URL
+ * as a single argv entry with no shell in between, so nothing can split it.
+ *
+ * Exported for tests: the regression is entirely in how argv is built.
+ *
+ * @param {string} url
+ * @param {string} [platform=process.platform]
+ * @returns {[string, string[]]} `[ command, args ]`
+ */
+export function browserOpenArgv( url, platform = process.platform ) {
+	if ( platform === 'win32' ) return [ 'explorer.exe', [ url ] ];
+	if ( platform === 'darwin' ) return [ 'open', [ url ] ];
+	return [ 'xdg-open', [ url ] ];
+}
+
+/**
  * Best-effort open a URL in the user's default browser. Never throws: a failed
  * launch just means the user copies the printed URL by hand.
  *
@@ -50,10 +81,10 @@ export function metrikaAuthorizeUrl( clientId ) {
  */
 function openInBrowser( url ) {
 	try {
-		const [ cmd, args ] =
-			process.platform === 'win32' ? [ 'cmd', [ '/c', 'start', '', url ] ]
-			: process.platform === 'darwin' ? [ 'open', [ url ] ]
-			: [ 'xdg-open', [ url ] ];
+		const [ cmd, args ] = browserOpenArgv( url );
+		// Only a spawn failure counts as "did not open": explorer.exe reports a
+		// non-zero exit code even when it successfully handed the URL off, so the
+		// exit code is intentionally never inspected.
 		const child = spawn( cmd, args, { stdio: 'ignore', detached: true, windowsHide: true } );
 		child.on( 'error', ( err ) => logger.debug( `[FIX] metrika-setup: browser open failed: ${ err.message }` ) );
 		child.unref();
@@ -112,6 +143,56 @@ async function guideOAuthToken( { open = openInBrowser, promptInput = input, pro
 }
 
 /**
+ * Best-effort liveness check for a Metrika OAuth token. Never throws and never
+ * blocks the flow: an unreachable API yields `unknown`, not a failure, in line
+ * with the graceful-degradation style used by the installers in this codebase.
+ *
+ * Why this exists: a token is bound to the pair (OAuth app, Yandex account) —
+ * not to a project. Running the OAuth flow again for a second project can
+ * therefore supersede the token a first project already stored in its
+ * `.claude/.env`, and nothing but a live call can tell the difference between
+ * "still valid" and "silently revoked".
+ *
+ * The token value is never logged — only the resulting HTTP status.
+ *
+ * @param {string} token
+ * @param {object} [opts]
+ * @param {typeof fetch} [opts.fetchImpl=fetch] - injected in tests
+ * @param {number} [opts.timeoutMs=TOKEN_PROBE_TIMEOUT_MS]
+ * @returns {Promise<{ status: 'valid'|'invalid'|'unknown', code: number, reason: string }>}
+ */
+export async function verifyMetrikaToken( token, { fetchImpl = fetch, timeoutMs = TOKEN_PROBE_TIMEOUT_MS } = {} ) {
+	const value = String( token ?? '' ).trim();
+	if ( ! value ) {
+		logger.debug( 'metrika-setup: token probe skipped — empty token' );
+		return { status: 'invalid', code: 0, reason: 'empty token' };
+	}
+
+	const controller = new AbortController();
+	const timer = setTimeout( () => controller.abort(), timeoutMs );
+	try {
+		logger.debug( `metrika-setup: probing token against ${ METRIKA_COUNTERS_URL }` );
+		const res = await fetchImpl( METRIKA_COUNTERS_URL, {
+			headers: { Authorization: `OAuth ${ value }` },
+			signal: controller.signal,
+		} );
+		const code = res?.status ?? 0;
+		logger.debug( `metrika-setup: token probe returned HTTP ${ code }` );
+		if ( code === 200 ) return { status: 'valid', code, reason: 'ok' };
+		// 401 = no/!valid token, 403 = token rejected for this resource. Both mean
+		// "this string will not work", everything else is inconclusive.
+		if ( code === 401 || code === 403 ) return { status: 'invalid', code, reason: `HTTP ${ code }` };
+		return { status: 'unknown', code, reason: `unexpected HTTP ${ code }` };
+	} catch ( err ) {
+		const reason = err?.name === 'AbortError' ? `timed out after ${ timeoutMs }ms` : err.message;
+		logger.debug( `metrika-setup: token probe failed: ${ reason }` );
+		return { status: 'unknown', code: 0, reason };
+	} finally {
+		clearTimeout( timer );
+	}
+}
+
+/**
  * Probe how much of the Metrika integration is already present in a project.
  *
  * @param {string} cwd
@@ -153,8 +234,9 @@ export async function detectMetrikaState( cwd ) {
  * @param {object} [opts]
  * @param {boolean} [opts.assumeYes=false] - skip the leading confirm (used when
  *   the caller already decided to set up Metrika, e.g. `--metrika`).
+ * @param {object} [opts._internals] - test seam; `{ verifyToken }`.
  */
-export async function askMetrikaCredentials( { assumeYes = false } = {} ) {
+export async function askMetrikaCredentials( { assumeYes = false, _internals = {} } = {} ) {
 	if ( ! assumeYes ) {
 		const want = await confirm( {
 			message: 'Set up Yandex Metrica integration (goals, analytics, saved reports, audience segments)?',
@@ -183,10 +265,40 @@ export async function askMetrikaCredentials( { assumeYes = false } = {} ) {
 		await guideOAuthToken();
 	}
 
-	const token = await password( {
-		message: 'Metrica OAuth token (paste the y0_… value; needs metrika:write for goals/segments):',
-		mask: '*',
-	} );
+	// Ask → probe → offer a retry. An empty value used to sail straight through
+	// to `.claude/.env`, where it read back as "credentials missing" and left the
+	// user convinced they had entered a token.
+	const verifyToken = _internals.verifyToken ?? verifyMetrikaToken;
+	let token = '';
+	for ( ;; ) {
+		token = ( await password( {
+			message: 'Metrica OAuth token (paste the y0_… value; needs metrika:write for goals/segments):',
+			mask: '*',
+			validate: ( v ) => !! String( v ?? '' ).trim() || 'Required',
+		} ) ).trim();
+
+		const probe = await verifyToken( token );
+		if ( probe.status === 'valid' ) {
+			logger.success( 'Token accepted by the Metrica API.' );
+			break;
+		}
+		if ( probe.status === 'unknown' ) {
+			logger.warn( `Could not reach the Metrica API to check the token (${ probe.reason }) — continuing unverified.` );
+			logger.info( 'Run `seomi-wp-mcp doctor` once you are back online to confirm it works.' );
+			break;
+		}
+
+		logger.warn( `The Metrica API rejected this token (${ probe.reason }).` );
+		logger.info( 'Likely causes: a truncated paste, an expired token, or access revoked in Yandex ID.' );
+		logger.info( 'A token belongs to an app + account, not to a project — re-running the OAuth flow' );
+		logger.info( 'elsewhere can supersede the token an earlier project is still using.' );
+		const again = await confirm( { message: 'Paste the token again?', default: true } );
+		if ( ! again ) {
+			logger.warn( 'Keeping the unverified token — fix it in .claude/.env and re-run `seomi-wp-mcp doctor`.' );
+			break;
+		}
+	}
+
 	const counterId = await input( {
 		message: 'Metrica counter id(s), comma-separated for multiple (e.g. 43286099,46188792):',
 		validate: ( v ) => !! v.trim() || 'Required',

@@ -21,7 +21,7 @@ import { ensurePlugins } from '../lib/wp-plugin-installer.mjs';
 import { detectAgentMdTargets, isClaudeImportStub } from '../lib/agent-md-target.mjs';
 import { probeRemoteWpCli, ensureWpCliOnSsh } from '../lib/ssh-wp-cli-installer.mjs';
 import { detectPython } from '../lib/python-detector.mjs';
-import { detectMetrikaState, setupMetrika } from '../lib/metrika-setup.mjs';
+import { detectMetrikaState, setupMetrika, verifyMetrikaToken } from '../lib/metrika-setup.mjs';
 
 const MU_PLUGIN_HEADER = 'wp-content/mu-plugins/seomi-mcp-abilities/seomi-mcp-abilities.php';
 const MU_LOADER_FILE = 'wp-content/mu-plugins/mcp-abilities.php';
@@ -335,6 +335,17 @@ export async function doctorCommand( opts ) {
 	if ( anyMetrika ) {
 		if ( metrikaState.hasEnv ) {
 			report.pass( 'Yandex Metrica creds present (METRIKA_OAUTH_TOKEN, METRIKA_COUNTER_ID)' );
+			// Presence is not validity: the token is bound to (OAuth app, Yandex
+			// account), so running the OAuth flow for another project — or revoking
+			// the app in Yandex ID — can kill this one without touching the file.
+			const tokenProbe = await verifyMetrikaToken( env?.METRIKA_OAUTH_TOKEN );
+			if ( tokenProbe.status === 'valid' ) {
+				report.pass( 'Yandex Metrica OAuth token accepted by the API' );
+			} else if ( tokenProbe.status === 'invalid' ) {
+				report.warn( `Yandex Metrica OAuth token rejected by the API (${ tokenProbe.reason }) — expired, revoked, or superseded`, 'Run `seomi-wp-mcp update --metrika` and paste a fresh token' );
+			} else {
+				report.warn( `Could not verify the Yandex Metrica OAuth token (${ tokenProbe.reason })`, 'Network issue — re-run `seomi-wp-mcp doctor` when back online' );
+			}
 		} else {
 			report.warn( 'Yandex Metrica: METRIKA_OAUTH_TOKEN / METRIKA_COUNTER_ID missing in .claude/.env', 'Run `seomi-wp-mcp update --metrika` or `init`' );
 		}

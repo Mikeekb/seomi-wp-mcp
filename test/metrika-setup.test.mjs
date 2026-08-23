@@ -4,7 +4,7 @@ import { mkdtemp, rm, mkdir, writeFile, readFile } from 'node:fs/promises';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
-import { detectMetrikaState, setupMetrika, metrikaAuthorizeUrl, METRIKA_MCP_SERVER } from '../src/lib/metrika-setup.mjs';
+import { detectMetrikaState, setupMetrika, metrikaAuthorizeUrl, browserOpenArgv, verifyMetrikaToken, METRIKA_MCP_SERVER } from '../src/lib/metrika-setup.mjs';
 import { venvPythonPath, CLIENT_SERVER_REL } from '../src/lib/metrika-mcp-installer.mjs';
 
 /**
@@ -137,6 +137,76 @@ test( 'metrikaAuthorizeUrl: builds implicit-flow url, trims and encodes client i
 		metrikaAuthorizeUrl( undefined ),
 		'https://oauth.yandex.ru/authorize?response_type=token&client_id='
 	);
+} );
+
+test( 'browserOpenArgv: never routes the authorize URL through cmd.exe on win32', () => {
+	const url = metrikaAuthorizeUrl( 'abc123' );
+
+	// Regression: `cmd /c start "" <url>` let cmd.exe treat `&` as a command
+	// separator, so the browser opened the URL truncated before client_id.
+	const [ cmd, args ] = browserOpenArgv( url, 'win32' );
+	assert.equal( cmd, 'explorer.exe' );
+	assert.deepEqual( args, [ url ] );
+	assert.ok( ! cmd.startsWith( 'cmd' ), 'must not go through a shell that splits on &' );
+	assert.ok( args.every( ( a ) => ! /^\/c$/i.test( a ) && a !== 'start' ), 'no cmd /c start wrapper' );
+	// The single argv entry still carries the whole query string.
+	assert.ok( args[ 0 ].includes( '&client_id=abc123' ), 'client_id survives argv construction' );
+
+	// The other platforms hand the URL over without a shell already.
+	assert.deepEqual( browserOpenArgv( url, 'darwin' ), [ 'open', [ url ] ] );
+	assert.deepEqual( browserOpenArgv( url, 'linux' ), [ 'xdg-open', [ url ] ] );
+} );
+
+test( 'verifyMetrikaToken: maps API responses to valid / invalid / unknown', async () => {
+	const calls = [];
+	const fetchImpl = ( status ) => async ( url, init ) => {
+		calls.push( { url, auth: init.headers.Authorization } );
+		return { status };
+	};
+
+	assert.deepEqual(
+		await verifyMetrikaToken( 'y0_good', { fetchImpl: fetchImpl( 200 ) } ),
+		{ status: 'valid', code: 200, reason: 'ok' }
+	);
+	// Revoked / mistyped tokens are the case doctor must stop reporting green.
+	assert.equal( ( await verifyMetrikaToken( 'y0_dead', { fetchImpl: fetchImpl( 401 ) } ) ).status, 'invalid' );
+	assert.equal( ( await verifyMetrikaToken( 'y0_dead', { fetchImpl: fetchImpl( 403 ) } ) ).status, 'invalid' );
+	// Anything else is inconclusive — never a hard failure.
+	assert.equal( ( await verifyMetrikaToken( 'y0_x', { fetchImpl: fetchImpl( 500 ) } ) ).status, 'unknown' );
+
+	// Correct endpoint and OAuth header shape.
+	assert.equal( calls[ 0 ].url, 'https://api-metrika.yandex.net/management/v1/counters' );
+	assert.equal( calls[ 0 ].auth, 'OAuth y0_good' );
+} );
+
+test( 'verifyMetrikaToken: degrades gracefully and skips the call on empty input', async () => {
+	// Network down / DNS failure must not throw out of the installer.
+	const boom = async () => { throw new Error( 'getaddrinfo ENOTFOUND' ); };
+	const offline = await verifyMetrikaToken( 'y0_x', { fetchImpl: boom } );
+	assert.equal( offline.status, 'unknown' );
+	assert.match( offline.reason, /ENOTFOUND/ );
+
+	// A hung API aborts on the timeout instead of blocking the prompt forever.
+	const hang = ( url, init ) => new Promise( ( _resolve, reject ) => {
+		init.signal.addEventListener( 'abort', () => {
+			const err = new Error( 'aborted' );
+			err.name = 'AbortError';
+			reject( err );
+		} );
+	} );
+	const timedOut = await verifyMetrikaToken( 'y0_x', { fetchImpl: hang, timeoutMs: 10 } );
+	assert.equal( timedOut.status, 'unknown' );
+	assert.match( timedOut.reason, /timed out/ );
+
+	// Empty/blank token is rejected locally — no pointless request.
+	let called = false;
+	const spy = async () => { called = true; return { status: 200 }; };
+	for ( const value of [ '', '   ', undefined, null ] ) {
+		const res = await verifyMetrikaToken( value, { fetchImpl: spy } );
+		assert.equal( res.status, 'invalid' );
+		assert.equal( res.reason, 'empty token' );
+	}
+	assert.equal( called, false, 'empty token must not hit the network' );
 } );
 
 test( 'detectMetrikaState: empty env value is not "configured"', async () => {
