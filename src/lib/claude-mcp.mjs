@@ -83,17 +83,53 @@ export function buildStdioLocalConfig( { wpCliPharPath, wpRoot, user, siteUrl, m
 	return { command: 'php', args, type: 'stdio' };
 }
 
+/** MSYS-сборка OpenSSH, которая приезжает вместе с Git for Windows. */
+export const GIT_SSH_DIR = 'C:\\Program Files\\Git\\usr\\bin';
+
+/**
+ * env-блок, который заставляет wp-cli взять рабочий `ssh.exe`.
+ *
+ * WP-CLI не ходит по SSH сам: на `--ssh=` он через `passthru()` запускает
+ * внешний `ssh`, который резолвится по PATH. На Windows первым в PATH обычно
+ * стоит Win32-OpenSSH (`C:\Windows\System32\OpenSSH\ssh.exe`), и он ломается,
+ * когда его stdio — анонимные пайпы, а к процессу не привязана консоль. Ровно
+ * этот случай у MCP-сервера на безголовом хосте (агент под `code tunnel` или
+ * Remote Control):
+ *
+ *   debug3: read - ERROR from cb :87        // 87 = ERROR_INVALID_PARAMETER
+ *   debug2: channel 0: read failed rfd 5 maxlen 32768: Unknown error
+ *
+ * Удалённая команда при этом отрабатывает, но ssh не закрывает канал и висит
+ * вечно → MCP-хендшейк не случается → клиент помечает сервер как failed.
+ * В терминале то же самое работает — там у процесса есть консоль, поэтому
+ * баг не виден до переезда на сервер.
+ *
+ * MSYS-сборка из Git использует обычный блокирующий I/O и на пайпах без
+ * консоли работает нормально. `${PATH}` раскрывает сам Claude Code при запуске
+ * сервера, так что остальной PATH сохраняется.
+ *
+ * Возвращает `null`, если платформа не Windows или Git-овый ssh не найден —
+ * тогда запись остаётся без `env`.
+ */
+export function sshPathEnv( { platform = process.platform, gitSshDir = GIT_SSH_DIR } = {} ) {
+	if ( platform !== 'win32' ) return null;
+	if ( ! existsSync( join( gitSshDir, 'ssh.exe' ) ) ) return null;
+	return { PATH: `${ gitSshDir };\${PATH}` };
+}
+
 /**
  * Build a stdio + WP-CLI config for a REMOTE/PROD WordPress via SSH.
  * sshSpec format matches WP-CLI's --ssh=: `[user@]host[:port][/path]`.
  *
  * See `buildStdioLocalConfig` for why `siteUrl` → `--url=<siteUrl>` matters.
+ * See `sshPathEnv` for why the entry carries a PATH override on Windows.
  */
-export function buildStdioSshConfig( { wpCliPharPath, sshSpec, user, siteUrl, mcpServerName = 'mcp-adapter-default-server' } ) {
+export function buildStdioSshConfig( { wpCliPharPath, sshSpec, user, siteUrl, mcpServerName = 'mcp-adapter-default-server', platform = process.platform, gitSshDir = GIT_SSH_DIR } ) {
 	const args = [ wpCliPharPath, '--ssh=' + sshSpec ];
 	if ( siteUrl ) args.push( '--url=' + siteUrl );
 	args.push( 'mcp-adapter', 'serve', '--server=' + mcpServerName, '--user=' + user );
-	return { command: 'php', args, type: 'stdio' };
+	const env = sshPathEnv( { platform, gitSshDir } );
+	return env ? { command: 'php', args, env, type: 'stdio' } : { command: 'php', args, type: 'stdio' };
 }
 
 /**

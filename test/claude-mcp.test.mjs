@@ -1,6 +1,17 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
-import { buildStdioLocalConfig, buildStdioSshConfig, composeSshSpec, buildMetrikaMcpConfig } from '../src/lib/claude-mcp.mjs';
+import { buildStdioLocalConfig, buildStdioSshConfig, composeSshSpec, buildMetrikaMcpConfig, sshPathEnv } from '../src/lib/claude-mcp.mjs';
+import { mkdtempSync, writeFileSync, mkdirSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+/** Каталог-заглушка с ssh.exe — чтобы тесты не зависели от того, стоит ли Git. */
+function fakeGitSshDir() {
+	const dir = join( mkdtempSync( join( tmpdir(), 'seomi-ssh-' ) ), 'usr', 'bin' );
+	mkdirSync( dir, { recursive: true } );
+	writeFileSync( join( dir, 'ssh.exe' ), '' );
+	return dir;
+}
 
 test( 'buildStdioLocalConfig: appends --url when siteUrl is given', () => {
 	const cfg = buildStdioLocalConfig( {
@@ -51,6 +62,36 @@ test( 'buildStdioSshConfig: omits --url when siteUrl is missing', () => {
 		user: 'ai-agent',
 	} );
 	assert.ok( ! cfg.args.some( ( a ) => a.startsWith( '--url=' ) ) );
+} );
+
+// Регрессия: MCP-сервер `wordpress-prod` намертво висел на безголовом сервере,
+// потому что wp-cli брал Win32-OpenSSH, а тот ломается на пайпах без консоли.
+test( 'buildStdioSshConfig: on Windows pins Git ssh via env.PATH', () => {
+	const gitSshDir = fakeGitSshDir();
+	const cfg = buildStdioSshConfig( {
+		wpCliPharPath: 'C:/wp-cli/wp-cli.phar',
+		sshSpec: 'user@host:22/srv/www',
+		user: 'ai-agent',
+		platform: 'win32',
+		gitSshDir,
+	} );
+	assert.equal( cfg.env.PATH, `${ gitSshDir };\${PATH}` );
+	// Порядок ключей важен: addServerEntry сравнивает записи через JSON.stringify.
+	assert.deepEqual( Object.keys( cfg ), [ 'command', 'args', 'env', 'type' ] );
+} );
+
+test( 'buildStdioSshConfig: no env on non-Windows', () => {
+	const cfg = buildStdioSshConfig( {
+		wpCliPharPath: '/usr/local/bin/wp-cli.phar',
+		sshSpec: 'user@host:22/srv/www',
+		user: 'ai-agent',
+		platform: 'linux',
+	} );
+	assert.ok( ! ( 'env' in cfg ), 'PATH override is a Windows-only workaround' );
+} );
+
+test( 'sshPathEnv: returns null when Git ssh is absent', () => {
+	assert.equal( sshPathEnv( { platform: 'win32', gitSshDir: 'C:\\nope\\usr\\bin' } ), null );
 } );
 
 test( 'composeSshSpec: assembles user@host:port/path', () => {
