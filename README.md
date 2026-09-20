@@ -129,6 +129,22 @@ This installs only the `aif-wp-mcp` skill (from `skills/aif-wp-mcp/` in this rep
 
 The skill lives in its own folder under `.claude/skills/aif-wp-mcp/`, separate from the `aif-*` skills shipped by ai-factory, so updates to `ai-factory` never overwrite it.
 
+### Global skills win over the bundled copies
+
+`init` and `update` install the bundled skills (`aif-wp-mcp`, `acf-fields`, `wp-forms`, `yandex-metrika`) into `.claude/skills/` — **unless you already keep that skill globally** at `~/.claude/skills/<slug>/` (or `$CLAUDE_CONFIG_DIR/skills/<slug>/`).
+
+If a global copy is found, the CLI skips the project install and **deletes a stale project copy** left by an earlier run. This is deliberate: Claude Code lets a project-level skill shadow the global one, so a bundled copy would silently override the version you maintain centrally, and the two would drift apart.
+
+A directory only counts as a global skill when it actually contains `SKILL.md` — an empty leftover folder will not suppress the install. Symlinked skill folders are recognized.
+
+To hoist a skill out of your projects, move it once:
+
+```bash
+mv .claude/skills/wp-forms ~/.claude/skills/wp-forms
+```
+
+From then on every `seomi-wp-mcp init`/`update` leaves it alone.
+
 ## Yandex Metrica integration
 
 `init` can optionally wire the project to **Yandex Metrica (Яндекс.Метрика)** so AI agents can pull analytics, manage goals, and work with audience segments through MCP. This is **fully optional and independent of WordPress** — you can add it to a plain project too.
