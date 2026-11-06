@@ -32,8 +32,8 @@ import {
 	composeSshSpec,
 } from '../lib/claude-mcp.mjs';
 import { ensurePlugins } from '../lib/wp-plugin-installer.mjs';
-import { installBundledSkills, BUNDLED_SKILLS, hasGlobalSkill } from '../lib/skill-installer.mjs';
-import { askMetrikaCredentials, setupMetrika } from '../lib/metrika-setup.mjs';
+import { syncBundledSkills, metrikaSkillAction, CORE_SKILLS, METRIKA_SKILL, hasGlobalSkill } from '../lib/skill-installer.mjs';
+import { askMetrikaCredentials, setupMetrika, detectMetrikaState } from '../lib/metrika-setup.mjs';
 import { ensureSshKey } from '../lib/ssh-key-setup.mjs';
 import { ensureMuPluginOnSsh } from '../lib/ssh-mu-plugin-installer.mjs';
 import { ensureWpCliOnSsh } from '../lib/ssh-wp-cli-installer.mjs';
@@ -347,6 +347,31 @@ async function updateAgentMd( cwd, env, targets ) {
 	return results;
 }
 
+/**
+ * What `init` does with the `yandex-metrika` skill (see `metrikaSkillAction`):
+ * install it when the user just agreed to set Metrica up, or when a re-run of
+ * `init` finds Metrica already present; otherwise don't install it (and drop a
+ * CLI-managed project copy). `--no-metrika` on a project that already has
+ * Metrica leaves the skill as it is.
+ *
+ * @param {string} cwd
+ * @param {object} p
+ * @param {object} [p.opts] - CLI flags (`no-metrika`).
+ * @param {{ enabled: boolean }} [p.metrikaCreds] - `askMetrikaCredentials` result.
+ * @param {typeof detectMetrikaState} [p.detect] - injectable for tests.
+ * @returns {Promise<'install'|'keep'|'remove'>}
+ */
+export async function resolveInitMetrikaSkillAction( cwd, { opts = {}, metrikaCreds = { enabled: false }, detect = detectMetrikaState } = {} ) {
+	const state = await detect( cwd );
+	const action = metrikaSkillAction( {
+		state,
+		accepted: !! metrikaCreds.enabled,
+		noMetrika: !! opts[ 'no-metrika' ],
+	} );
+	logger.debug( `init: yandex-metrika skill action=${ action } (accepted=${ !! metrikaCreds.enabled }, no-metrika=${ !! opts[ 'no-metrika' ] })` );
+	return action;
+}
+
 export async function initCommand( opts ) {
 	const cwd = process.cwd();
 	logger.step( `seomi-wp-mcp init — cwd: ${ cwd }` );
@@ -456,12 +481,14 @@ export async function initCommand( opts ) {
 	// the project — a project-level skill shadows the global one, so a local
 	// copy would quietly revert the central version. Name them in the prompt so
 	// the shortened install list isn't a surprise.
-	const globalSkills = BUNDLED_SKILLS.filter( ( slug ) => hasGlobalSkill( slug ) );
-	const localSkills = BUNDLED_SKILLS.filter( ( slug ) => ! globalSkills.includes( slug ) );
+	// `yandex-metrika` is not listed: it follows the Metrica answer below.
+	const globalSkills = CORE_SKILLS.filter( ( slug ) => hasGlobalSkill( slug ) );
+	const localSkills = CORE_SKILLS.filter( ( slug ) => ! globalSkills.includes( slug ) );
+	const metrikaNote = `; ${ METRIKA_SKILL } only if Yandex Metrica is set up`;
 	const installSkill = await confirm( {
 		message: globalSkills.length
-			? `Install ai-factory skills into .claude/skills/ (${ localSkills.join( ', ' ) || 'none left' })? Already global, will be skipped: ${ globalSkills.join( ', ' ) }`
-			: `Install ai-factory skills into .claude/skills/ (${ BUNDLED_SKILLS.join( ', ' ) })?`,
+			? `Install ai-factory skills into .claude/skills/ (${ localSkills.join( ', ' ) || 'none left' }${ metrikaNote })? Already global, will be skipped: ${ globalSkills.join( ', ' ) }`
+			: `Install ai-factory skills into .claude/skills/ (${ CORE_SKILLS.join( ', ' ) }${ metrikaNote })?`,
 		default: true,
 	} );
 
@@ -532,9 +559,11 @@ export async function initCommand( opts ) {
 	}
 
 	// 4. Drop ai-factory skills (aif-wp-mcp + WP helpers)
+	//    yandex-metrika only when Metrica is (being) set up — see resolveInitMetrikaSkillAction.
 	let skillRes = null;
 	if ( installSkill ) {
-		skillRes = await installBundledSkills( cwd );
+		const metrikaAction = await resolveInitMetrikaSkillAction( cwd, { opts, metrikaCreds } );
+		skillRes = await syncBundledSkills( cwd, { metrikaAction } );
 	}
 
 	// 5. Update agent-instructions file(s) — AGENTS.md and/or CLAUDE.md, whichever

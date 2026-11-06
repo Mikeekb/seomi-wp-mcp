@@ -4,8 +4,10 @@
  * Steps:
  *   1. Detect connection mode (submodule / composer / plain clone).
  *   2. Run the appropriate update command.
- *   3. Regenerate managed block in CLAUDE.md from the bundled template.
- *   4. Refresh aif-wp-mcp skill in .claude/skills/ (overwrite — managed by CLI).
+ *   3. Install / refresh Yandex Metrica when it is (or is being) set up.
+ *   4. Refresh the bundled skills in .claude/skills/ (overwrite — managed by
+ *      CLI); `yandex-metrika` only when Metrica is set up.
+ *   5. Regenerate managed block in AGENTS.md / CLAUDE.md from the bundled template.
  */
 
 import { existsSync } from 'node:fs';
@@ -19,7 +21,7 @@ import { renderClaudeMdBlock } from '../lib/claude-md-renderer.mjs';
 import { detectAgentMdTargets, ensureClaudeImportStub, isClaudeImportStub } from '../lib/agent-md-target.mjs';
 import { detectThemeOrPluginSlug } from '../lib/project-asset-detector.mjs';
 import { checkForUpdate, performSelfUpdate } from '../lib/self-update.mjs';
-import { installBundledSkills } from '../lib/skill-installer.mjs';
+import { syncBundledSkills, metrikaSkillAction } from '../lib/skill-installer.mjs';
 import { detectMetrikaState, askMetrikaCredentials, setupMetrika } from '../lib/metrika-setup.mjs';
 
 const MU_PLUGIN_DIR = 'wp-content/mu-plugins/seomi-mcp-abilities';
@@ -129,23 +131,40 @@ async function runSelfUpdateGate() {
 }
 
 /**
+ * Injection seam for tests — `maybeSetupMetrikaOnUpdate` resolves its
+ * collaborators through this object so the decision tree can be exercised
+ * without prompts, Python or the network.
+ */
+export const _internals = {
+	detectMetrikaState,
+	askMetrikaCredentials,
+	setupMetrika,
+	isInteractive: () => !! process.stdin.isTTY,
+};
+
+/**
  * Metrica install/refresh during `update`. Encapsulates the doustanovka
  * decision tree so `updateCommand` stays a linear orchestrator.
+ *
+ * Returns what to do with the `yandex-metrika` skill afterwards
+ * (`'install' | 'keep' | 'remove'`, see `metrikaSkillAction`): the skill ships
+ * only alongside the MCP server.
  */
-async function maybeSetupMetrikaOnUpdate( cwd, opts ) {
+export async function maybeSetupMetrikaOnUpdate( cwd, opts = {} ) {
+	const deps = _internals;
+	const state = await deps.detectMetrikaState( cwd );
+
 	if ( opts[ 'no-metrika' ] ) {
 		logger.info( 'Yandex Metrica setup skipped (--no-metrika).' );
-		return;
+		return metrikaSkillAction( { state, noMetrika: true } );
 	}
-
-	const state = await detectMetrikaState( cwd );
 
 	if ( state.configured ) {
 		// Fully set up already — just refresh the server source + venv and make
 		// sure the .mcp.json entry is current. Credentials untouched, no prompts.
 		logger.step( 'Refreshing Yandex Metrica MCP server' );
-		await setupMetrika( cwd, {} );
-		return;
+		await deps.setupMetrika( cwd, {} );
+		return 'install';
 	}
 
 	if ( state.hasEnv ) {
@@ -153,22 +172,23 @@ async function maybeSetupMetrikaOnUpdate( cwd, opts ) {
 		// half-finished setup, or creds added by hand) — finish it without
 		// re-asking for the token.
 		logger.step( 'Completing Yandex Metrica setup (credentials already present)' );
-		await setupMetrika( cwd, {} );
-		return;
+		await deps.setupMetrika( cwd, {} );
+		return 'install';
 	}
 
 	// Nothing configured yet. Offer the доустановка.
-	const interactive = !! process.stdin.isTTY;
-	if ( opts.metrika || interactive ) {
-		const creds = await askMetrikaCredentials( { assumeYes: !! opts.metrika } );
+	if ( opts.metrika || deps.isInteractive() ) {
+		const creds = await deps.askMetrikaCredentials( { assumeYes: !! opts.metrika } );
 		if ( creds.enabled ) {
 			logger.step( 'Installing Yandex Metrica MCP server' );
-			await setupMetrika( cwd, { env: creds.env } );
+			await deps.setupMetrika( cwd, { env: creds.env } );
+			return 'install';
 		}
-		return;
+		return metrikaSkillAction( { state } );
 	}
 
 	logger.info( 'Yandex Metrica not configured. Add it with: seomi-wp-mcp update --metrika (or seomi-wp-mcp init).' );
+	return metrikaSkillAction( { state } );
 }
 
 export async function updateCommand( opts = {} ) {
@@ -224,11 +244,6 @@ export async function updateCommand( opts = {} ) {
 	const after = await readPluginVersion( cwd );
 	logger.success( `Plugin version after: ${ after ?? '(unknown)' }` );
 
-	// Regenerate skill files (CLI-managed). Wipe+recopy semantics live in the
-	// shared installer so init and update stay in sync on the bundle contents.
-	logger.step( 'Refreshing ai-factory skills' );
-	await installBundledSkills( cwd );
-
 	// Yandex Metrica: this is the "доустановка" path — projects created with an
 	// older seomi-wp-mcp gain the Metrica integration here. Behaviour depends on
 	// current state and flags:
@@ -236,7 +251,14 @@ export async function updateCommand( opts = {} ) {
 	//   already configured  → refresh the server + venv (no prompts)
 	//   creds present only  → finish the install non-interactively (reuse creds)
 	//   nothing yet         → offer doustanovka (interactive, or forced by --metrika)
-	await maybeSetupMetrikaOnUpdate( cwd, opts );
+	// Runs before the skills refresh: whether the yandex-metrika skill belongs
+	// in the project depends on the outcome.
+	const metrikaAction = await maybeSetupMetrikaOnUpdate( cwd, opts );
+
+	// Regenerate skill files (CLI-managed). Wipe+recopy semantics live in the
+	// shared installer so init and update stay in sync on the bundle contents.
+	logger.step( 'Refreshing ai-factory skills' );
+	await syncBundledSkills( cwd, { metrikaAction } );
 
 	// Regenerate the managed block in whichever agent-instructions file the
 	// project uses (AGENTS.md and/or CLAUDE.md). update runs non-interactively —

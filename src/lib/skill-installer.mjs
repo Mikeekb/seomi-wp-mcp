@@ -17,6 +17,11 @@
  * (`~/.claude/skills/<slug>/`) is NOT installed into the project — see
  * `hasGlobalSkill`.
  *
+ * `yandex-metrika` is conditional: it only makes sense next to the
+ * `yandex-metrika` MCP server, so `syncBundledSkills` installs it only when
+ * Metrica is set up (or being set up) in the project — see
+ * `metrikaSkillAction`.
+ *
  * A missing source directory (e.g. a partially built/published package) is a
  * `warn`, not a throw: the rest of the bundle still installs.
  */
@@ -32,6 +37,38 @@ import { logger } from './logger.mjs';
  * (it is the primary ai-factory skill); the WP-specific helpers follow.
  */
 export const BUNDLED_SKILLS = [ 'aif-wp-mcp', 'acf-fields', 'wp-forms', 'yandex-metrika' ];
+
+/** Skill that ships only together with the `yandex-metrika` MCP server. */
+export const METRIKA_SKILL = 'yandex-metrika';
+
+/** Skills installed unconditionally (everything except the Metrica skill). */
+export const CORE_SKILLS = BUNDLED_SKILLS.filter( ( slug ) => slug !== METRIKA_SKILL );
+
+/**
+ * Decide what to do with the `yandex-metrika` skill in a project.
+ *
+ *   'install' — Metrica is being set up right now (`accepted`), or is already
+ *               present (creds in `.claude/.env` or a `yandex-metrika` entry
+ *               in `.mcp.json`) and this run doesn't opt out of it.
+ *   'keep'    — Metrica is present but this run was told `--no-metrika`: the
+ *               flag means "don't touch Metrica now", so the skill that
+ *               belongs to the still-registered server is left as it is.
+ *   'remove'  — no Metrica in the project and none being set up: the skill
+ *               would only describe a server that doesn't exist. Its project
+ *               copy is CLI-managed (wipe+recopy), so removing it is safe.
+ *
+ * @param {object} p
+ * @param {{ configured?: boolean, hasEnv?: boolean, hasMcp?: boolean }} [p.state] - `detectMetrikaState` result.
+ * @param {boolean} [p.accepted=false] - user agreed (prompt or `--metrika`) to set Metrica up in this run.
+ * @param {boolean} [p.noMetrika=false] - `--no-metrika` was passed.
+ * @returns {'install'|'keep'|'remove'}
+ */
+export function metrikaSkillAction( { state = {}, accepted = false, noMetrika = false } = {} ) {
+	if ( accepted && ! noMetrika ) return 'install';
+	const present = !! ( state.configured || state.hasEnv || state.hasMcp );
+	if ( ! present ) return 'remove';
+	return noMetrika ? 'keep' : 'install';
+}
 
 /**
  * Resolve the package root from `src/lib/`. `new URL( '../..', … )` walks up
@@ -133,5 +170,44 @@ export async function installBundledSkills( cwd, { slugs = BUNDLED_SKILLS, respe
 		results.push( { slug, action: 'installed', dest } );
 	}
 
+	return results;
+}
+
+/**
+ * Install the bundle with the Metrica skill handled per `metrikaAction`
+ * (see `metrikaSkillAction`): core skills always go through
+ * `installBundledSkills`; `yandex-metrika` is installed, left alone, or its
+ * project copy is removed. A global `yandex-metrika` skill is never touched.
+ *
+ * @param {string} cwd
+ * @param {object} [options]
+ * @param {'install'|'keep'|'remove'} [options.metrikaAction='remove']
+ * @param {boolean} [options.respectGlobal] - forwarded to `installBundledSkills`.
+ * @param {object} [options._internals] - forwarded to `installBundledSkills`.
+ * @returns {Promise<Array<{ slug: string, action: string, dest: string }>>}
+ *   Same shape as `installBundledSkills`, plus a `removed` / `not-needed` /
+ *   `kept` entry for the Metrica skill when it is not installed.
+ */
+export async function syncBundledSkills( cwd, { metrikaAction = 'remove', ...rest } = {} ) {
+	const slugs = metrikaAction === 'install' ? BUNDLED_SKILLS : CORE_SKILLS;
+	logger.debug( `syncBundledSkills: metrikaAction=${ metrikaAction }, slugs=${ slugs.join( ',' ) }` );
+	const results = await installBundledSkills( cwd, { ...rest, slugs } );
+	if ( metrikaAction === 'install' ) return results;
+
+	const dest = join( cwd, '.claude', 'skills', METRIKA_SKILL );
+	if ( metrikaAction === 'keep' ) {
+		logger.info( `Leaving ${ METRIKA_SKILL } skill as is (--no-metrika)` );
+		results.push( { slug: METRIKA_SKILL, action: 'kept', dest } );
+		return results;
+	}
+	if ( existsSync( dest ) ) {
+		const rmFn = rest._internals?.rm ?? rm;
+		logger.step( `Removing ${ METRIKA_SKILL } skill — Yandex Metrica is not set up in this project` );
+		await rmFn( dest, { recursive: true, force: true } );
+		results.push( { slug: METRIKA_SKILL, action: 'removed', dest } );
+	} else {
+		logger.info( `Skipping ${ METRIKA_SKILL } skill: Yandex Metrica is not set up in this project` );
+		results.push( { slug: METRIKA_SKILL, action: 'not-needed', dest } );
+	}
 	return results;
 }

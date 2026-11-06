@@ -131,7 +131,7 @@ The skill lives in its own folder under `.claude/skills/aif-wp-mcp/`, separate f
 
 ### Global skills win over the bundled copies
 
-`init` and `update` install the bundled skills (`aif-wp-mcp`, `acf-fields`, `wp-forms`, `yandex-metrika`) into `.claude/skills/` — **unless you already keep that skill globally** at `~/.claude/skills/<slug>/` (or `$CLAUDE_CONFIG_DIR/skills/<slug>/`).
+`init` and `update` install the bundled skills (`aif-wp-mcp`, `acf-fields`, `wp-forms`, and `yandex-metrika` — the last one **only when Yandex Metrica is set up** in the project or you agree to set it up in that run) into `.claude/skills/` — **unless you already keep that skill globally** at `~/.claude/skills/<slug>/` (or `$CLAUDE_CONFIG_DIR/skills/<slug>/`). Without Metrica (declined, `--no-metrika`, or not configured on a non-interactive `update`) a project copy of `yandex-metrika` is removed; `--no-metrika` on a project that already has Metrica leaves the skill as is.
 
 If a global copy is found, the CLI skips the project install and **deletes a stale project copy** left by an earlier run. This is deliberate: Claude Code lets a project-level skill shadow the global one, so a bundled copy would silently override the version you maintain centrally, and the two would drift apart.
 
