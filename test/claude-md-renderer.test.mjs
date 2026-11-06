@@ -17,8 +17,6 @@ import {
 	renderAbilitiesIntro,
 	renderDiscoverCommand,
 	renderAccessSection,
-	renderDeploymentSection,
-	renderMcpServersSection,
 	renderClaudeMdBlock,
 } from '../src/lib/claude-md-renderer.mjs';
 
@@ -89,31 +87,61 @@ test( 'discover command: picks local when present, else prod', () => {
 	assert.equal( renderDiscoverCommand( PROD_ONLY ), 'mcp__wordpress-prod__mcp-adapter-discover-abilities' );
 } );
 
-test( 'access section: prod-only emits SSH examples with host/user/port/wp-root', () => {
+test( 'access section: prod-only emits ssh / wp --ssh / rsync with host/user/port/wp-root', () => {
 	const out = renderAccessSection( PROD_ONLY );
-	assert.match( out, /Production access \(SSH\)/ );
+	assert.match( out, /\.claude\/\.env/ );
 	assert.match( out, /ssh -p 2222 newbeone@newbeone\.beget\.tech/ );
 	assert.match( out, /wp --ssh=newbeone@newbeone\.beget\.tech:2222\/home\/n\/newbeone\/example\.com\/public_html/ );
+	// rsync's inner ssh uses lowercase -p.
+	assert.match( out, /rsync -avz -e "ssh -p 2222" / );
+	assert.match( out, /newbeone@newbeone\.beget\.tech:\/home\/n\/newbeone\/example\.com\/public_html\/wp-content\// );
 	assert.doesNotMatch( out, /undefined/ );
 } );
 
-test( 'access section: local-only does NOT include Production access section', () => {
+test( 'access section: local-only has the .env pointer but no prod commands', () => {
 	const out = renderAccessSection( LOCAL_ONLY );
-	assert.doesNotMatch( out, /Production access/ );
+	assert.match( out, /\.claude\/\.env/ );
+	assert.doesNotMatch( out, /```/ );
+	assert.doesNotMatch( out, /--ssh=/ );
 	assert.doesNotMatch( out, /undefined/ );
 } );
 
-test( 'access section: omits SSH port flag when blank', () => {
+test( 'access section: omits port flags when blank', () => {
 	const out = renderAccessSection( BOTH );
 	assert.match( out, /ssh newbeone@newbeone\.beget\.tech/ );
 	assert.doesNotMatch( out, /ssh -p / );
+	assert.doesNotMatch( out, /-e "ssh -p / );
+	assert.match( out, /--ssh=newbeone@newbeone\.beget\.tech\/home\// );
+} );
+
+test( 'access section: does not dump .env values or secrets as a table', () => {
+	const out = renderAccessSection( BOTH );
+	assert.doesNotMatch( out, /\| Key \| Value \|/ );
+	assert.doesNotMatch( out, /yyyy|xxxx/ );
+} );
+
+test( 'access section: detected theme slug appears in rsync deploy line', () => {
+	const out = renderAccessSection( PROD_ONLY, { assetSlug: { kind: 'theme', slug: 'my-theme' } } );
+	assert.match( out, /\.\/wp-content\/themes\/my-theme\// );
+	assert.doesNotMatch( out, /<theme-or-plugin-slug>/ );
+} );
+
+test( 'access section: detected plugin slug appears in rsync deploy line', () => {
+	const out = renderAccessSection( PROD_ONLY, { assetSlug: { kind: 'plugin', slug: 'my-plugin' } } );
+	assert.match( out, /\.\/wp-content\/plugins\/my-plugin\// );
+	assert.doesNotMatch( out, /<theme-or-plugin-slug>/ );
+} );
+
+test( 'access section: no asset detected → placeholder appears', () => {
+	const out = renderAccessSection( PROD_ONLY );
+	assert.match( out, /<themes-or-plugins>\/<theme-or-plugin-slug>/ );
 } );
 
 test( 'full block render: prod-only — no literal "undefined" anywhere', async () => {
 	const block = await renderClaudeMdBlock( PROD_ONLY, TEMPLATE );
 	assert.doesNotMatch( block, /undefined/ );
 	assert.match( block, /wordpress-prod/ );
-	assert.match( block, /WP_PROD_SSH_HOST/ );
+	assert.match( block, /mcp__wordpress-prod__mcp-adapter-discover-abilities/ );
 } );
 
 test( 'full block render: local-only — no literal "undefined" anywhere', async () => {
@@ -134,105 +162,41 @@ test( 'full block render: heading "## Credentials & remote access" stays stable 
 
 test( 'full block render: template placeholders are all expanded', async () => {
 	const block = await renderClaudeMdBlock( BOTH, TEMPLATE );
-	assert.doesNotMatch( block, /\{\{ABILITIES_INTRO\}\}/ );
-	assert.doesNotMatch( block, /\{\{DISCOVER_COMMAND\}\}/ );
-	assert.doesNotMatch( block, /\{\{ACCESS_SECTION\}\}/ );
-	assert.doesNotMatch( block, /\{\{DEPLOYMENT_SECTION\}\}/ );
-	assert.doesNotMatch( block, /\{\{MCP_SERVERS_SECTION\}\}/ );
-	assert.doesNotMatch( block, /\{\{WP_LOCAL_MCP_SERVER\}\}/ );
-	assert.doesNotMatch( block, /\{\{WP_PROD_MCP_SERVER\}\}/ );
+	assert.doesNotMatch( block, /\{\{[A-Z_]+\}\}/ );
 } );
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Deployment section (T1.1, T1.2, T1.3)
-// ─────────────────────────────────────────────────────────────────────────────
-
-test( 'deployment section: prod-only includes scp/rsync with correct port flag', () => {
-	const out = renderDeploymentSection( PROD_ONLY );
-	assert.match( out, /Deployment to production \(SCP\/SSH\)/ );
-	// scp uses -P (capital), ssh and rsync's inner ssh use -p (lowercase).
-	assert.match( out, /scp -P 2222 -r/ );
-	assert.match( out, /rsync -avz -e "ssh -p 2222"/ );
-	assert.match( out, /ssh -p 2222 newbeone@newbeone\.beget\.tech/ );
-	assert.match( out, /newbeone@newbeone\.beget\.tech:\/home\/n\/newbeone\/example\.com\/public_html/ );
-	assert.doesNotMatch( out, /undefined/ );
+test( 'full block render: keeps the must-have rules', async () => {
+	const block = await renderClaudeMdBlock( BOTH, TEMPLATE );
+	assert.match( block, /`seomi\/\*` abilities first/ );
+	assert.match( block, /\$wpdb->update\( \$wpdb->term_taxonomy/ );
+	assert.match( block, /wp_insert_post/ );
+	assert.match( block, /with_admin_term_kses/ );
+	assert.match( block, /PhpStorm/ );
+	assert.match( block, /CLI-managed/ );
+	assert.match( block, /aif-wp-mcp/ );
+	assert.match( block, /seomi-wp-mcp doctor/ );
 } );
 
-test( 'deployment section: blank port → no -P / -p flag', () => {
-	const out = renderDeploymentSection( BOTH );
-	assert.match( out, /Deployment to production/ );
-	assert.doesNotMatch( out, /scp -P /, 'scp should not get -P when port is blank' );
-	assert.doesNotMatch( out, /ssh -p /, 'ssh should not get -p when port is blank' );
-	assert.doesNotMatch( out, /-e "ssh -p /, 'rsync should not pass -e ssh -p when port is blank' );
+test( 'full block render: playbooks and derivable tables are not resident', async () => {
+	const block = await renderClaudeMdBlock( BOTH, TEMPLATE, { assetSlug: { kind: 'theme', slug: 'x' } } );
+	assert.doesNotMatch( block, /Adding a new ability/ );
+	assert.doesNotMatch( block, /Proactive ability-gap/ );
+	assert.doesNotMatch( block, /## Lifecycle/ );
+	assert.doesNotMatch( block, /Adding a new MCP server/ );
+	assert.doesNotMatch( block, /seomi\/get-posts/ );
+	assert.doesNotMatch( block, /^scp /m );
 } );
 
-test( 'deployment section: local-only does NOT include deployment section', () => {
-	const out = renderDeploymentSection( LOCAL_ONLY );
-	assert.equal( out, '', 'local-only must render empty deployment section' );
+test( 'full block render: stays within the ~3 KB context budget', async () => {
+	for ( const env of [ BOTH, LOCAL_ONLY, PROD_ONLY ] ) {
+		const block = await renderClaudeMdBlock( env, TEMPLATE, { assetSlug: { kind: 'theme', slug: 'some-long-theme-slug' } } );
+		assert.ok( Buffer.byteLength( block ) <= 3072, `block is ${ Buffer.byteLength( block ) } bytes` );
+	}
 } );
 
-test( 'deployment section: includes anti-PhpStorm hint string', () => {
-	const out = renderDeploymentSection( PROD_ONLY );
-	assert.match( out, /Do NOT propose PhpStorm/ );
-} );
-
-test( 'deployment section: detected theme slug appears in scp examples', () => {
-	const out = renderDeploymentSection( PROD_ONLY, { assetSlug: { kind: 'theme', slug: 'my-theme' } } );
-	assert.match( out, /\.\/wp-content\/themes\/my-theme\// );
-	assert.match( out, /wp-content\/themes\/my-theme\/$/m );
-	assert.doesNotMatch( out, /<theme-or-plugin-slug>/ );
-} );
-
-test( 'deployment section: detected plugin slug appears in scp examples', () => {
-	const out = renderDeploymentSection( PROD_ONLY, { assetSlug: { kind: 'plugin', slug: 'my-plugin' } } );
-	assert.match( out, /\.\/wp-content\/plugins\/my-plugin\// );
-	assert.doesNotMatch( out, /<theme-or-plugin-slug>/ );
-} );
-
-test( 'deployment section: no asset detected → placeholder appears', () => {
-	const out = renderDeploymentSection( PROD_ONLY );
-	assert.match( out, /<theme-or-plugin-slug>/ );
-} );
-
-// ─────────────────────────────────────────────────────────────────────────────
-// MCP servers section (T2.1, T2.2, T2.3)
-// ─────────────────────────────────────────────────────────────────────────────
-
-test( 'mcp-servers section: both targets list both servers with scope=project', () => {
-	const out = renderMcpServersSection( BOTH );
-	assert.match( out, /## MCP servers in this project/ );
-	assert.match( out, /\| `wordpress-local` \| project \|/ );
-	assert.match( out, /\| `wordpress-prod` \| project \|/ );
-} );
-
-test( 'mcp-servers section: local-only lists only local server', () => {
-	const out = renderMcpServersSection( LOCAL_ONLY );
-	assert.match( out, /\| `wordpress-local` \| project \|/ );
-	assert.doesNotMatch( out, /\| `wordpress-prod` \|/ );
-} );
-
-test( 'mcp-servers section: includes adding-new-server playbook', () => {
-	const out = renderMcpServersSection( BOTH );
-	assert.match( out, /Adding a new MCP server/ );
-	assert.match( out, /claude mcp add/ );
-	assert.match( out, /--scope (user|project)/ );
-	assert.match( out, /Restart Claude Code/ );
-} );
-
-test( 'mcp-servers section: mentions user-scope inspection command', () => {
-	const out = renderMcpServersSection( BOTH );
-	assert.match( out, /claude mcp list --scope user/ );
-} );
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Full block layout invariants (T5.1)
-// ─────────────────────────────────────────────────────────────────────────────
-
-test( 'full block render: no leading/trailing blank-line drift when DEPLOYMENT_SECTION is empty', async () => {
+test( 'full block render: no leading/trailing blank-line drift when prod commands are empty', async () => {
 	const block = await renderClaudeMdBlock( LOCAL_ONLY, TEMPLATE );
-	// At most one blank line between any two non-blank lines.
 	assert.doesNotMatch( block, /\n\n\n/, 'managed block must not contain three or more consecutive newlines' );
-	// Block starts on a non-blank line.
 	assert.match( block.slice( 0, 50 ), /^\S/ );
 } );
 
@@ -243,14 +207,8 @@ test( 'full block render: proactive SSH/MCP hint paragraph stays at top of block
 	assert.match( head, /mcpServers/ );
 } );
 
-test( 'full block render: deployment section integrated into block on prod setup', async () => {
+test( 'full block render: prod commands integrated into block with detected slug', async () => {
 	const block = await renderClaudeMdBlock( PROD_ONLY, TEMPLATE, { assetSlug: { kind: 'theme', slug: 'eltonn-theme' } } );
-	assert.match( block, /Deployment to production \(SCP\/SSH\)/ );
+	assert.match( block, /rsync -avz/ );
 	assert.match( block, /eltonn-theme/ );
-} );
-
-test( 'full block render: MCP servers section integrated into block', async () => {
-	const block = await renderClaudeMdBlock( BOTH, TEMPLATE );
-	assert.match( block, /## MCP servers in this project/ );
-	assert.match( block, /Adding a new MCP server/ );
 } );

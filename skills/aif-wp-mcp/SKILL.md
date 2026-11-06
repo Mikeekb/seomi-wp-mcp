@@ -73,9 +73,9 @@ Relevant keys (only the ones for configured targets exist in the file):
 
 When the user asks the agent to "deploy to prod", "ssh to prod", "run wp-cli on prod", etc.,
 the first action is `cat .claude/.env` (or `Read` of that path) — never `cat ~/.ssh/config`.
-The generated CLAUDE.md managed block (between `seomi-wp-mcp:start` / `:end`) also
-includes a "Credentials & remote access" section with concrete `ssh` / `wp --ssh=...`
-examples derived from these exact env values; use those examples verbatim.
+The generated managed block in `AGENTS.md` / `CLAUDE.md` (between `seomi-wp-mcp:start` /
+`:end`) also includes a "Credentials & remote access" section with ready `ssh`,
+`wp --ssh=...` and `rsync` commands derived from these exact env values; use them verbatim.
 
 ### Deploy to production (SSH)
 
@@ -88,9 +88,19 @@ Triggers (Russian and English):
 `--ssh=<spec>` that the prod MCP server uses in `.mcp.json` is a regular SSH spec, so
 `scp` / `rsync` / `ssh` to that host work without any extra setup.
 
-**Then:** use the `scp` / `rsync` / `ssh` examples from the managed CLAUDE.md block
-(under `### Deployment to production (SCP/SSH)`). The CLI generates them from
-`.claude/.env` values, including the actual theme/plugin slug for this project.
+**Then:** start from the `ssh` / `wp --ssh=` / `rsync` commands in the managed block
+("Credentials & remote access"). The CLI generates them from `.claude/.env`, including the
+actual theme/plugin slug. Other recipes on the same channel (`<port>` blank → drop the flag;
+note `scp` takes `-P`, `ssh` takes `-p`):
+
+```bash
+# one-shot copy
+scp -P <port> -r ./wp-content/themes/<slug>/ <user>@<host>:<wp-root>/wp-content/themes/<slug>/
+# incremental (preferred for repeat deploys)
+rsync -avz -e "ssh -p <port>" ./wp-content/themes/<slug>/ <user>@<host>:<wp-root>/wp-content/themes/<slug>/
+# flush caches after a deploy
+ssh -p <port> <user>@<host> "cd <wp-root> && wp cache flush"
+```
 
 **Do NOT propose** PhpStorm/WebStorm "Deploy" UI, Cyberduck, FileZilla, or any GUI
 client as the *first* option for file pushes. PhpStorm UI is acceptable only when the
@@ -193,13 +203,16 @@ Common methods (full reference in `references/abilities.md`):
 
 1. **Never** write term descriptions via `$wpdb->update( $wpdb->term_taxonomy, ... )` directly —
    Yoast `created_term` / `edited_term` actions don't fire and SEO indexes go stale.
-2. **Never** create/update WooCommerce products via `wp_insert_post` / `wp_update_post` — use
-   WC CRUD (`wc_get_product`, `$product->save()`). The `seomi-wc/*` abilities already do this
-   correctly.
-3. If `mcp__<server-name>__mcp-adapter-discover-abilities` does not list the expected `seomi/*`
+2. **Never** create/update WooCommerce products via `wp_insert_post` / `wp_update_post` or raw
+   `$wpdb` — use WC CRUD (`wc_get_product`, `$product->save()`), otherwise WC lookup tables go
+   out of sync. The `seomi-wc/*` abilities already do this correctly.
+3. When extending the mu-plugin, route every term-description write through
+   `Seomi\Mcp\Core::with_admin_term_kses()` — it detaches `wp_filter_kses` from
+   `pre_term_description` while the callback runs, mimicking admin behaviour.
+4. If `mcp__<server-name>__mcp-adapter-discover-abilities` does not list the expected `seomi/*`
    methods, **stop** and run `seomi-wp-mcp doctor` before any further attempt — don't fall back
    to WP-CLI silently. The user explicitly requested DB-aware writes.
-4. Credentials live in `.claude/.env` (gitignored). Never commit `.env` and never paste an app
+5. Credentials live in `.claude/.env` (gitignored). Never commit `.env` and never paste an app
    password into chat output.
 
 ## Where things live
@@ -298,7 +311,7 @@ tree is in detached HEAD by default — naïve in-place edits get lost.
 4. **Extend smoke test** in `tests/smoke.php`: add the ability name to `$expected` (or
    `$wc_abilities` for Woo). Optionally add a behavioural check. Run:
    `wp eval-file wp-content/mu-plugins/seomi-mcp-abilities/tests/smoke.php` — must be
-   `Failures: 0`.
+   `Failures: 0`. The smoke is the only thing that catches registration mistakes before users.
 5. **Push the standalone repo:**
    ```
    cd wp-content/mu-plugins/seomi-mcp-abilities
