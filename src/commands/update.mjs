@@ -3,7 +3,10 @@
  *
  * Steps:
  *   1. Detect connection mode (submodule / composer / plain clone).
- *   2. Run the appropriate update command.
+ *   2. Run the appropriate update command. A prod-only project (no local
+ *      mu-plugin, `.claude/.env` has `WP_PROD_*` but no `WP_LOCAL_URL`) skips
+ *      this step — the mu-plugin lives on prod and `update` never writes there;
+ *      a manual refresh command is printed instead.
  *   3. Install / refresh Yandex Metrica when it is (or is being) set up.
  *   4. Refresh the bundled skills in .claude/skills/ (overwrite — managed by
  *      CLI); `yandex-metrika` only when Metrica is set up.
@@ -26,6 +29,7 @@ import { detectMetrikaState, askMetrikaCredentials, setupMetrika } from '../lib/
 
 const MU_PLUGIN_DIR = 'wp-content/mu-plugins/seomi-mcp-abilities';
 const PLUGIN_HEADER_FILE = MU_PLUGIN_DIR + '/seomi-mcp-abilities.php';
+const MU_PLUGIN_REPO_URL = 'https://github.com/Mikeekb/wp-mcp-abilities.git';
 
 function pkgRoot() {
 	return resolvePath( new URL( '../..', import.meta.url ).pathname.replace( /^\/([A-Z]:)/, '$1' ) );
@@ -74,6 +78,47 @@ function detectMode( cwd ) {
 		return 'copy';
 	}
 	return 'none';
+}
+
+function present( v ) {
+	return typeof v === 'string' && v.trim().length > 0;
+}
+
+/**
+ * Prod-only project: `init` was answered "no local, yes production". Signal is
+ * `.claude/.env` — `init` always writes it and the managed block is rendered
+ * from it: some `WP_PROD_*` connection key (`WP_PROD_URL` /
+ * `WP_PROD_MCP_SERVER` / `WP_PROD_SSH_HOST`) and no `WP_LOCAL_URL`.
+ */
+export function isProdOnlyEnv( env = {} ) {
+	if ( present( env.WP_LOCAL_URL ) ) return false;
+	return present( env.WP_PROD_URL ) || present( env.WP_PROD_MCP_SERVER ) || present( env.WP_PROD_SSH_HOST );
+}
+
+/**
+ * What `update` does with the mu-plugin:
+ *   'local'     — a local connection exists (submodule/composer/copy): refresh it.
+ *   'prod-only' — no local mu-plugin, prod-only project: skip, print a manual hint.
+ *   'broken'    — no local mu-plugin and no prod config: fail (run `init`).
+ */
+export function resolveMuPluginPlan( mode, env = {} ) {
+	if ( mode !== 'none' ) return 'local';
+	return isProdOnlyEnv( env ) ? 'prod-only' : 'broken';
+}
+
+/** Manual command to refresh the mu-plugin on prod — `update` never writes to prod. */
+export function prodMuPluginHint( env = {} ) {
+	if ( ! present( env.WP_PROD_SSH_HOST ) ) {
+		return `Prod mu-plugin is not refreshed by \`update\`. Re-deploy ${ MU_PLUGIN_DIR }/ on prod manually from ${ MU_PLUGIN_REPO_URL }.`;
+	}
+	const user = present( env.WP_PROD_SSH_USER ) ? env.WP_PROD_SSH_USER : 'ai-agent';
+	const port = present( env.WP_PROD_SSH_PORT ) ? ` -p ${ env.WP_PROD_SSH_PORT }` : '';
+	const root = present( env.WP_PROD_WP_ROOT ) ? env.WP_PROD_WP_ROOT : '<wp-root>';
+	const dir = `${ root }/${ MU_PLUGIN_DIR }`;
+	return [
+		'Prod mu-plugin is not refreshed by `update` (it never writes to prod). To refresh it manually:',
+		`  ssh${ port } ${ user }@${ env.WP_PROD_SSH_HOST } 'rm -rf ${ dir } && git clone --depth=1 ${ MU_PLUGIN_REPO_URL } ${ dir } && rm -rf ${ dir }/.git'`,
+	].join( '\n' );
 }
 
 /**
@@ -205,44 +250,27 @@ export async function updateCommand( opts = {} ) {
 		}
 	}
 
-	const before = await readPluginVersion( cwd );
-	logger.info( `Plugin version before: ${ before ?? '(not installed)' }` );
-
+	const env = await readEnv( cwd );
 	const mode = detectMode( cwd );
-	logger.info( `Detected connection mode: ${ mode }` );
+	const muPlan = resolveMuPluginPlan( mode, env );
+	logger.info( `Detected connection mode: ${ mode } (mu-plugin: ${ muPlan })` );
 
-	if ( mode === 'none' ) {
+	if ( muPlan === 'broken' ) {
 		logger.error( 'mu-plugin not found. Run `seomi-wp-mcp init` first.' );
 		return 1;
 	}
 
-	if ( mode === 'submodule' ) {
-		logger.step( 'git submodule update --remote' );
-		const r = await exec( 'git', [ 'submodule', 'update', '--remote', MU_PLUGIN_DIR ], { cwd } );
-		if ( r.code !== 0 ) {
-			logger.error( `submodule update failed: ${ r.stderr.trim() }` );
-			return 1;
-		}
-	} else if ( mode === 'composer' ) {
-		logger.step( 'composer update seomi/wp-mcp-abilities' );
-		const r = await exec( 'composer', [ 'update', 'seomi/wp-mcp-abilities' ], { cwd } );
-		if ( r.code !== 0 ) {
-			logger.error( `composer update failed: ${ r.stderr.trim() }` );
-			return 1;
-		}
-	} else if ( mode === 'copy' ) {
-		logger.warn( 'Plain-clone mode — re-cloning to refresh.' );
-		await rm( join( cwd, MU_PLUGIN_DIR ), { recursive: true, force: true } );
-		const r = await exec( 'git', [ 'clone', '--depth=1', 'https://github.com/Mikeekb/wp-mcp-abilities.git', MU_PLUGIN_DIR ], { cwd } );
-		if ( r.code !== 0 ) {
-			logger.error( `git clone failed: ${ r.stderr.trim() }` );
-			return 1;
-		}
-		await rm( join( cwd, MU_PLUGIN_DIR, '.git' ), { recursive: true, force: true } );
+	if ( muPlan === 'prod-only' ) {
+		logger.info( 'Prod-only project (no local WordPress) — skipping local mu-plugin update.' );
+		logger.info( prodMuPluginHint( env ) );
+	} else {
+		const before = await readPluginVersion( cwd );
+		logger.info( `Plugin version before: ${ before ?? '(not installed)' }` );
+		const code = await updateLocalMuPlugin( cwd, mode );
+		if ( code !== 0 ) return code;
+		const after = await readPluginVersion( cwd );
+		logger.success( `Plugin version after: ${ after ?? '(unknown)' }` );
 	}
-
-	const after = await readPluginVersion( cwd );
-	logger.success( `Plugin version after: ${ after ?? '(unknown)' }` );
 
 	// Yandex Metrica: this is the "доустановка" path — projects created with an
 	// older seomi-wp-mcp gain the Metrica integration here. Behaviour depends on
@@ -263,7 +291,6 @@ export async function updateCommand( opts = {} ) {
 	// Regenerate the managed block in whichever agent-instructions file the
 	// project uses (AGENTS.md and/or CLAUDE.md). update runs non-interactively —
 	// if neither file exists, warn and skip; the user should run init first.
-	const env = await readEnv( cwd );
 	const templatePath = join( pkgRoot(), 'templates', 'claude-md-block.md' );
 	const assetSlug = detectThemeOrPluginSlug( cwd );
 	const block = await renderClaudeMdBlock( env, templatePath, { assetSlug } );
@@ -296,5 +323,34 @@ export async function updateCommand( opts = {} ) {
 	}
 
 	logger.success( 'Update complete.' );
+	return 0;
+}
+
+/** Refresh the local mu-plugin per connection mode. Returns an exit code. */
+async function updateLocalMuPlugin( cwd, mode ) {
+	if ( mode === 'submodule' ) {
+		logger.step( 'git submodule update --remote' );
+		const r = await exec( 'git', [ 'submodule', 'update', '--remote', MU_PLUGIN_DIR ], { cwd } );
+		if ( r.code !== 0 ) {
+			logger.error( `submodule update failed: ${ r.stderr.trim() }` );
+			return 1;
+		}
+	} else if ( mode === 'composer' ) {
+		logger.step( 'composer update seomi/wp-mcp-abilities' );
+		const r = await exec( 'composer', [ 'update', 'seomi/wp-mcp-abilities' ], { cwd } );
+		if ( r.code !== 0 ) {
+			logger.error( `composer update failed: ${ r.stderr.trim() }` );
+			return 1;
+		}
+	} else if ( mode === 'copy' ) {
+		logger.warn( 'Plain-clone mode — re-cloning to refresh.' );
+		await rm( join( cwd, MU_PLUGIN_DIR ), { recursive: true, force: true } );
+		const r = await exec( 'git', [ 'clone', '--depth=1', MU_PLUGIN_REPO_URL, MU_PLUGIN_DIR ], { cwd } );
+		if ( r.code !== 0 ) {
+			logger.error( `git clone failed: ${ r.stderr.trim() }` );
+			return 1;
+		}
+		await rm( join( cwd, MU_PLUGIN_DIR, '.git' ), { recursive: true, force: true } );
+	}
 	return 0;
 }

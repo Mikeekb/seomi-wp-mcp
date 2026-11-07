@@ -44,7 +44,7 @@ That's ~30 minutes of error-prone manual work, repeated for every WP project. `s
 | Command                              | What it does                                                           |
 |--------------------------------------|------------------------------------------------------------------------|
 | `seomi-wp-mcp init`                  | Interactive first-time setup (see above)                               |
-| `seomi-wp-mcp update`                | Pull the latest mu-plugin, regenerate the managed block in `AGENTS.md`/`CLAUDE.md`, and back-install the Yandex Metrica integration into projects created with an older version |
+| `seomi-wp-mcp update`                | Pull the latest mu-plugin, regenerate the managed block in `AGENTS.md`/`CLAUDE.md`, and back-install the Yandex Metrica integration into projects created with an older version. In a prod-only project (no local WordPress) the mu-plugin step is skipped — `update` never writes to prod and prints a manual refresh command instead |
 | `seomi-wp-mcp doctor`                | Diagnose env, mu-plugin presence, MCP server registration, plugin deps, and Metrica health (creds, Python 3.12+, venv, `yandex-metrika` in `.mcp.json`) |
 | `seomi-wp-mcp doctor --fix`          | Auto-install/activate Abilities API + MCP Adapter; install remote WP-CLI on prod if missing; finish a deferred Metrica install when creds already exist |
 | `seomi-wp-mcp init --metrika` / `--no-metrika` | Force the Yandex Metrica setup (skip the confirm) / skip it entirely — also valid on `update` |
